@@ -156,18 +156,33 @@ class HyperMILLoss:
         # 1. Base detection loss (unchanged)
         base_total, base_items = self.base(preds, batch)
 
-        feat = getattr(self.model_ref, "_hyperace_out", None)
-        if feat is None or not self.model_ref.training:
-            # During val/eval or if hook didn't fire, skip MIL
+        # 2. Hard skip MIL during validation/eval. torch.is_grad_enabled() is
+        #    False inside Validator.__call__ which wraps forward in no_grad(),
+        #    so this is the most robust train-vs-val signal.
+        if not torch.is_grad_enabled():
+            # Clear stale cache so next train batch starts fresh
+            self.model_ref._hyperace_out = None
             return base_total, base_items
 
-        # 2. MIL forward
+        feat = getattr(self.model_ref, "_hyperace_out", None)
+        if feat is None:
+            return base_total, base_items
+
+        # 3. Guard against batch-size mismatch (e.g. stale cache from a
+        #    different-batch-size pass slipping through).
+        img = batch.get("img") if isinstance(batch, dict) else None
+        if img is not None and feat.shape[0] != img.shape[0]:
+            self.model_ref._hyperace_out = None
+            return base_total, base_items
+
+        # 4. MIL forward
         mil_count, _ = self.model_ref.mil_head(feat)  # [B]
         B = feat.shape[0]
         device = mil_count.device
 
-        # 3. Target count per image from batch GT
+        # 5. Target count per image from batch GT
         if "batch_idx" not in batch:
+            self.model_ref._hyperace_out = None
             return base_total, base_items
         bidx = batch["batch_idx"].view(-1).to(device)
         target_count = torch.zeros(B, device=device, dtype=mil_count.dtype)
@@ -208,12 +223,15 @@ class HyperMILLoss:
 
         total = base_total + mil_scaled + consist_scaled
 
-        # 7. Track MIL stats on model for logging
+        # 8. Track MIL stats on model for logging
         self.model_ref._last_mil_loss = float(mil_loss.detach())
         self.model_ref._last_mil_count_mean = float(mil_count.mean().detach())
         self.model_ref._last_mil_target_mean = float(target_count.mean().detach())
         if consist_w > 0:
             self.model_ref._last_consist_loss = float(consist_loss.detach())
+
+        # Clear cache so next batch starts fresh (defensive)
+        self.model_ref._hyperace_out = None
 
         return total, base_items
 
