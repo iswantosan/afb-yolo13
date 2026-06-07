@@ -50,22 +50,22 @@ head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]    # 9
   - [[-1, 6], 1, Concat, [1]]                     # 10
   - [-1, 2, DSC3k2, [512, True]]                  # 11
-  - [-1, 1, CBAM, [512]]                          # 12  channel + spatial attention
+  - [-1, 1, CBAM, []]                             # 12  channel + spatial attention
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]    # 13
   - [[-1, 4], 1, Concat, [1]]                     # 14
   - [-1, 2, DSC3k2, [256, True]]                  # 15  P3 head
-  - [-1, 1, CBAM, [256]]                          # 16
+  - [-1, 1, CBAM, []]                             # 16
 
   # PAN bottom-up
   - [-1, 1, Conv, [256, 3, 2]]                    # 17
   - [[-1, 12], 1, Concat, [1]]                    # 18
   - [-1, 2, DSC3k2, [512, True]]                  # 19  P4 head
-  - [-1, 1, CBAM, [512]]                          # 20
+  - [-1, 1, CBAM, []]                             # 20
 
   - [-1, 1, Conv, [512, 3, 2]]                    # 21
   - [[-1, 8], 1, Concat, [1]]                     # 22
   - [-1, 2, DSC3k2, [1024, True]]                 # 23  P5 head
-  - [-1, 1, CBAM, [1024]]                         # 24
+  - [-1, 1, CBAM, []]                             # 24
 
   - [[16, 20, 24], 1, Detect, [nc]]               # 25  Detect(P3, P4, P5)

@@ -38,6 +38,8 @@ from ultralytics.nn.modules import (
     CBFuse,
     CBLinear,
     Classify,
+    CBAM,
+    ChannelAttention,
     Concat,
     Conv,
     Conv2,
@@ -1108,6 +1110,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m is SpatialFullPAD_Tunnel:  # AFB: needs `channels` arg for gate predictor
             c2 = ch[f[0]]
             args = [c2]  # channels arg for gate predictor
+        elif m in {CBAM, ChannelAttention}:  # AFB-lite: attention takes c1 from previous layer
+            c2 = ch[f]
+            args = [c2, *args]
         else:
             c2 = ch[f]
 
