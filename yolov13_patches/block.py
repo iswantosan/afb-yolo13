@@ -2096,3 +2096,100 @@ class HyperACEScale(nn.Module):
         y[1] = out1
         y.append(out2)
         return self.cv2(torch.cat(y, 1))
+
+
+# ============================================================================
+# AFB-YOLOv13: Mamba (Selective State Space) modules
+#
+# Real arch novelty angle: "First Mamba-augmented YOLOv13 for AFB detection."
+# Replaces expensive A2C2f area-attention at backbone P4/P5 with SSM-based
+# MambaC2f. SSM linear complexity vs attention quadratic, better long-range.
+#
+# Prior art (real, NOT halu):
+#   - Wang et al. AAAI 2024, Mamba YOLO (arXiv:2406.05835)
+#   - MambaNeXt-YOLO 2025 (arXiv:2506.03654)
+#   - Mamba-YOLO-ML for mulberry leaf disease 2025
+#   - Super Mamba 2025 for small obj
+#
+# Requires: pip install mamba-ssm causal-conv1d
+# Falls back to 1D Conv impostor if package missing (model still builds).
+# ============================================================================
+
+class MambaBlock(nn.Module):
+    """Selective State-Space block for 2D feature maps.
+
+    Flattens (B,C,H,W) -> (B,H*W,C) sequence, applies LayerNorm + Mamba SSM,
+    reshapes back, residual-adds with input.
+
+    Args:
+        dim: channel dim.
+        d_state: SSM state dim (default 16, mamba paper).
+        d_conv: causal conv dim before SSM (default 4).
+        expand: inner expansion factor (default 2).
+        bidirectional: also scan reverse direction.
+    """
+
+    def __init__(self, dim, d_state: int = 16, d_conv: int = 4,
+                 expand: int = 2, bidirectional: bool = False):
+        super().__init__()
+        self.dim = dim
+        self.bidirectional = bidirectional
+        self.norm = nn.LayerNorm(dim)
+        try:
+            from mamba_ssm import Mamba
+            self.mamba = Mamba(d_model=dim, d_state=d_state,
+                               d_conv=d_conv, expand=expand)
+            if bidirectional:
+                self.mamba_back = Mamba(d_model=dim, d_state=d_state,
+                                        d_conv=d_conv, expand=expand)
+            self._fallback = False
+        except ImportError:
+            import warnings
+            warnings.warn(
+                "[MambaBlock] mamba-ssm not installed; falling back to "
+                "1D Conv impostor (no SSM). pip install mamba-ssm causal-conv1d",
+                RuntimeWarning,
+            )
+            self.mamba = nn.Conv1d(dim, dim, 3, padding=1, groups=dim)
+            if bidirectional:
+                self.mamba_back = nn.Conv1d(dim, dim, 3, padding=1, groups=dim)
+            self._fallback = True
+
+    def _apply(self, m, z):
+        if self._fallback:
+            return m(z.transpose(1, 2)).transpose(1, 2)
+        return m(z)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        z = x.flatten(2).transpose(1, 2)            # [B, N, C]
+        z_norm = self.norm(z)
+        y = self._apply(self.mamba, z_norm)         # [B, N, C]
+        if self.bidirectional:
+            y_back = self._apply(self.mamba_back, z_norm.flip(1)).flip(1)
+            y = (y + y_back) * 0.5
+        out = y.transpose(1, 2).reshape(B, C, H, W)
+        return out + x
+
+
+class MambaC2f(nn.Module):
+    """CSP-style block with MambaBlock as internal processor.
+
+    Drop-in replacement for A2C2f / C3k2 in YAML. Args pattern:
+        [-1, n, MambaC2f, [c2, bidirectional, e]]
+    """
+
+    def __init__(self, c1, c2, n: int = 1, bidirectional: bool = False,
+                 e: float = 0.5):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * c_, 1, 1)
+        self.cv2 = Conv((2 + n) * c_, c2, 1, 1)
+        self.m = nn.ModuleList(
+            MambaBlock(c_, bidirectional=bidirectional) for _ in range(n)
+        )
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))

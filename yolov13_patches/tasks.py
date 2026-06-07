@@ -76,6 +76,7 @@ from ultralytics.nn.modules import (
     RodDSC3k2,
     SpatialFullPAD_Tunnel,
     HyperACEScale,
+    MambaC2f,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1011,6 +1012,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             DSC3k2,
             DSConv,
             RodDSC3k2,  # AFB: rod-shape bottleneck variant
+            MambaC2f,   # AFB: Mamba SSM-based CSP block
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1040,6 +1042,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 A2C2f,
                 DSC3k2,
                 RodDSC3k2,  # AFB: rod variant uses same insert-repeats pattern as DSC3k2
+                MambaC2f,   # AFB: Mamba block uses same insert-repeats pattern
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1

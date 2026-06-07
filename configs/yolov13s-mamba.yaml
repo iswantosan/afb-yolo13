@@ -1,0 +1,80 @@
+# YOLOv13s + Mamba (Selective State Space Model) backbone variant.
+#
+# Real arch novelty for paper:
+#   "First Mamba-augmented YOLOv13 for Acid-Fast Bacilli detection on
+#    Ziehl-Neelsen smear microscopy."
+#
+# Prior art (real, NOT halu):
+#   - Mamba YOLO (Wang et al. AAAI 2024, arXiv:2406.05835)
+#   - MambaNeXt-YOLO 2025 (arXiv:2506.03654)
+#   - Mamba-YOLO-ML for mulberry leaf disease 2025
+#   - Super Mamba 2025 for small obj
+#   AFB/TB application: not found in literature search -> niche novelty.
+#
+# Strategy:
+#   Replace A2C2f (Area-Attention CSP) at backbone P4 (layer 6) and P5
+#   (layer 8) with MambaC2f (Mamba SSM-based CSP). SSM linear complexity
+#   vs attention quadratic, better long-range dependency modeling.
+#   HyperACE + FullPAD + neck untouched (those gates work fine per
+#   5-fold baseline diagnose).
+#
+# Cost vs baseline:
+#   Params: ~similar (Mamba blocks are compact)
+#   FLOPs : slightly lower at high-res (linear vs quadratic scaling)
+#   Train : ~1.2x (Mamba is fast but bidirectional doubles cost)
+#
+# Requirements:
+#   pip install mamba-ssm causal-conv1d
+#   CUDA 11.8+ (Colab T4/A100 OK)
+#   If mamba-ssm missing, MambaBlock falls back to 1D Conv impostor and
+#   logs a warning. Model still trains but loses SSM benefit.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0  P1/2
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1  P2/4
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3  P3/8
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5  P4/16
+  - [-1, 4, MambaC2f, [512, False]]               # 6  Mamba @ P4 (was A2C2f)
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7  P5/32
+  - [-1, 4, MambaC2f, [1024, False]]              # 8  Mamba @ P5 (was A2C2f)
+
+# === HEAD: identical to baseline yolov13.yaml ===
+head:
+  - [[4, 6, 8], 2, HyperACE, [512, 8, True, True, 0.5, 1, "both"]]   # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 10
+  - [9, 1, DownsampleConv, []]                                       # 11
+  - [[6, 9],  1, FullPAD_Tunnel, []]                                 # 12
+  - [[4, 10], 1, FullPAD_Tunnel, []]                                 # 13
+  - [[8, 11], 1, FullPAD_Tunnel, []]                                 # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 15
+  - [[-1, 12], 1, Concat, [1]]                                       # 16
+  - [-1, 2, DSC3k2, [512, True]]                                     # 17
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 18
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                       # 19
+  - [[-1, 13], 1, Concat, [1]]                                       # 20
+  - [-1, 2, DSC3k2, [256, True]]                                     # 21
+  - [10, 1, Conv, [256, 1, 1]]                                       # 22
+  - [[21, 22], 1, FullPAD_Tunnel, []]                                # 23
+
+  - [-1, 1, Conv, [256, 3, 2]]                                       # 24
+  - [[-1, 18], 1, Concat, [1]]                                       # 25
+  - [-1, 2, DSC3k2, [512, True]]                                     # 26
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 27
+
+  - [26, 1, Conv, [512, 3, 2]]                                       # 28
+  - [[-1, 14], 1, Concat, [1]]                                       # 29
+  - [-1, 2, DSC3k2, [1024, True]]                                    # 30
+  - [[-1, 11], 1, FullPAD_Tunnel, []]                                # 31
+
+  - [[23, 27, 31], 1, Detect, [nc]]                                  # 32

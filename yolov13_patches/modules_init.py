@@ -68,6 +68,8 @@ from .block import (
     SpatialFullPAD_Tunnel,
     ScaleAwareFuseModule,
     HyperACEScale,
+    MambaBlock,
+    MambaC2f,
 )
 from .conv import (
     CBAM,
@@ -184,4 +186,6 @@ __all__ = (
     "SpatialFullPAD_Tunnel",
     "ScaleAwareFuseModule",
     "HyperACEScale",
+    "MambaBlock",
+    "MambaC2f",
 )
