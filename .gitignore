@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.ipynb_checkpoints/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Runs / outputs
+runs/
+wandb/
+diag_*/
+label_quality_probe/
+*.log
+
+# Dataset (gak dipush, terlalu besar)
+datasets/
+tb_chen_split/
+Tuberculosis6208/
+*.zip
+
+# Generated data.yaml (paths user-specific)
+configs/data.yaml

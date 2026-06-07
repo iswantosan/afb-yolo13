@@ -1,0 +1,12 @@
+# YOLOv13 fork (iMoonLab) sudah include ultralytics dependencies.
+# Install YOLOv13 editable dulu: pip install -e D:/Project/yolov13
+# Lalu install dependency tambahan di bawah.
+
+numpy
+pandas
+matplotlib
+pillow
+tqdm
+
+# Optional - W&B logging (sama dengan yolo12.ipynb)
+wandb
