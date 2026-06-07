@@ -1,0 +1,80 @@
+# YOLOv13 variant: smaller kernel in head DSC3k2 blocks (k2=5 instead of 7).
+#
+# Targets HIGH `LOSS_LOCALIZATION` diagnose flag from baseline:
+#   mAP drop 0.117 from IoU 0.5 -> 0.7. mAP@0.9 ~ 0.003.
+#
+# Hypothesis: 7x7 depthwise kernels in head DSC3k2 over-smooth fine spatial
+# detail needed for precise box regression on ~40-80px elongated bacilli.
+# Smaller 5x5 kernels keep enough receptive field while preserving locality.
+#
+# Changes vs baseline yolov13.yaml:
+#   Head DSC3k2 at layers 17, 21, 26, 30:
+#     - was: [c2, dsc3k=True]                    (-> k1=3, k2=7 default)
+#     - now: [c2, dsc3k=True, e=0.5, g=1, shortcut=True, k1=3, k2=5]
+#
+# UNCHANGED (intentionally):
+#   - Backbone (DSC3k2 with k2=7 stays -- larger RF appropriate for backbone).
+#   - HyperACE + FullPAD distribution layers 9-14.
+#   - PAN connectivity (the bottom-up restructure killed gates in v2-p2).
+#   - Detect head (3 outputs, same scales as baseline).
+#
+# Cost vs baseline:
+#   Params: ~no change (depthwise kernel weights smaller, but pointwise dominates).
+#   FLOPs:  marginally lower (5x5 dw conv vs 7x7).
+#
+# Pretrained yolov13s.pt loads partial -- DSC3k2 weights with k=7 mismatch
+# kernel shape with k=5; those specific dw layers re-init. Backbone +
+# HyperACE + PAN structure OK.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0  P1/2
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1  P2/4
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3  P3/8
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5  P4/16
+  - [-1, 4, A2C2f,   [512, True, 4]]              # 6
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7  P5/32
+  - [-1, 4, A2C2f,   [1024, True, 1]]             # 8
+
+head:
+  - [[4, 6, 8], 2, HyperACE, [512, 8, True, True, 0.5, 1, "both"]]   # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 10
+  - [9, 1, DownsampleConv, []]                                       # 11
+  - [[6, 9],  1, FullPAD_Tunnel, []]                                 # 12
+  - [[4, 10], 1, FullPAD_Tunnel, []]                                 # 13
+  - [[8, 11], 1, FullPAD_Tunnel, []]                                 # 14
+
+  # FPN top-down P5 -> P4
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 15
+  - [[-1, 12], 1, Concat, [1]]                                       # 16
+  - [-1, 2, DSC3k2, [512, True, 0.5, 1, True, 3, 5]]                 # 17  fine k2=5
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 18
+
+  # FPN top-down P4 -> P3
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                       # 19
+  - [[-1, 13], 1, Concat, [1]]                                       # 20
+  - [-1, 2, DSC3k2, [256, True, 0.5, 1, True, 3, 5]]                 # 21  fine k2=5
+  - [10, 1, Conv, [256, 1, 1]]                                       # 22
+  - [[21, 22], 1, FullPAD_Tunnel, []]                                # 23
+
+  # PAN bottom-up P3 -> P4
+  - [-1, 1, Conv, [256, 3, 2]]                                       # 24
+  - [[-1, 18], 1, Concat, [1]]                                       # 25
+  - [-1, 2, DSC3k2, [512, True, 0.5, 1, True, 3, 5]]                 # 26  fine k2=5
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 27
+
+  # PAN bottom-up P4 -> P5
+  - [26, 1, Conv, [512, 3, 2]]                                       # 28
+  - [[-1, 14], 1, Concat, [1]]                                       # 29
+  - [-1, 2, DSC3k2, [1024, True, 0.5, 1, True, 3, 5]]                # 30  fine k2=5
+  - [[-1, 11], 1, FullPAD_Tunnel, []]                                # 31
+
+  - [[23, 27, 31], 1, Detect, [nc]]                                  # 32  Detect(P3, P4, P5)

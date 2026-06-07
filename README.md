@@ -109,7 +109,18 @@ Diagnose flags (baseline val):
 - **HIGH** `HARD_NEG_FP` — 66.9% FPs jauh dari GT (sebagian besar kemungkinan label noise, lihat label-quality probe).
 - FullPAD gates: **HEALTHY** (mean |g| = 0.152, 0/7 dead) → tidak perlu redesign HyperACE pathway.
 
-### v2 — P2 detection head ([`configs/yolov13s-p2.yaml`](configs/yolov13s-p2.yaml))
+### v2 — P2 detection head ([`configs/yolov13s-p2.yaml`](configs/yolov13s-p2.yaml)) ✗ FAILED
+
+**Result (val):** P=0.754 R=0.786 mAP50=0.848 mAP75=0.320 mAP50-95=0.413
+**Result (test):** P=0.800 R=0.805 mAP50=0.875 mAP75=0.319 mAP50-95=0.426
+**Δ vs baseline (test):** recall +0.019 ✓ tapi mAP50-95 flat (−0.002), mAP75 turun di val.
+
+**Diagnose post-mortem (val):**
+- n_pred meledak (12006 vs ~3000 baseline) — P2 grid 160×160 generate lots of low-conf preds.
+- **FullPAD gates 2/7 DEAD** (#6 PAN P4, #7 PAN P5) — restructuring PAN bottom-up dari P2 mematikan injection HyperACE→head P4/P5.
+- **HyperACE |output|_mean turun 60%** (2.60 → 1.04) — pathway underutilized.
+
+**Lesson:** Restructure PAN connectivity = breaks FullPAD distribution. Untuk arch lanjut, **surgical edits dalam blok existing only** (kernel size, channel, hyperedge count) — jangan tambah/hapus tunnel atau scale.
 
 Diagnose-driven response ke `LOSS_LOCALIZATION` flag:
 - Tambah detection head di stride 4 (feature map 160×160 @ imgsz 640) → resolusi lebih tinggi untuk small bacilli.
@@ -131,9 +142,27 @@ Pretrained `yolov13s.pt` di-load partial:
 
 Expected cost: ~+10–15% params, ~+30–40% FLOPs, ~+25–35% train time vs baseline.
 
+### v3a — Smaller head kernel ([`configs/yolov13s-fine.yaml`](configs/yolov13s-fine.yaml))
+
+Targets HIGH `LOSS_LOCALIZATION` flag dengan surgical edit di dalam blok existing.
+
+**Change:** Head DSC3k2 (layers 17, 21, 26, 30) pakai `k2=5` (was `k2=7`).
+**Hypothesis:** 7×7 depthwise kernels over-smooth fine spatial detail. Bacilli ZN-stain di phone-camera ~40–80px elongated rod → 5×5 kernel cukup untuk receptive field, lebih tajam untuk box regression presisi.
+**Unchanged:** Backbone, HyperACE, FullPAD, PAN connectivity, Detect head (3 outputs).
+**Cost:** ~no params change, FLOPs marginally lower.
+
+### v3b — More hyperedges ([`configs/yolov13s-he16.yaml`](configs/yolov13s-he16.yaml))
+
+Targets YOLOv13-spesifik tweak — perkaya HyperACE high-order modeling untuk dataset dense.
+
+**Change:** HyperACE `num_hyperedges` 8 → 16.
+**Hypothesis:** ~8 bacilli/img dengan clustering spasial. 8 hyperedges = ~1 per bacilli, capacity rendah untuk model object-object interaction. 16 = 2× prototype capacity.
+**Unchanged:** Backbone, FullPAD, PAN, Detect, kernel sizes.
+**Cost:** ~+50K params di HyperACE, FLOPs marginal naik di AdaHGConv.
+
 ### Future variants (TBD)
 
-- v3 — `yolov13s-p2-nwd.yaml`: P2 head + NWD loss (`nwd_ratio=0.5`) untuk localization gain lebih lanjut.
-- v4 — Hyperedge scale-conditioned (eksperimen arsitektur HyperACE itu sendiri).
+- v3c — Combine v3a + v3b (kalau dua-duanya kasih signal).
+- v4 — Loss novelty (NWD / Inner-CIoU). FLOPs sama dengan baseline.
 
 Detail per-eksperimen tracked di W&B project `afb_yolov13_chen`, plus diagnose JSON per-run di `diag_<run_name>_val/`.
