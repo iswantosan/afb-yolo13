@@ -5,26 +5,8 @@ Adds an image-level bacilli count prediction head reading from HyperACE output
 a regularizer that exploits image-level supervision robustness against missing
 instance-level annotations.
 
-Motivation:
-    Sparsely-annotated AFB/TB microscopy datasets (e.g. Tuberculosis6208) have
-    label noise where annotators mark only a subset of bacilli per smear -- for
-    diagnostic purposes a few marked instances suffice, but the model treats
-    the rest as false positives. Image-level count (total bacilli per image) is
-    more robust to this noise than instance-level box annotations.
-
-    By auxiliary-training to predict image-level count from HyperACE's
-    hypergraph-enhanced features, the model is pushed to discover ALL bacilli
-    (not only the GT-marked ones), then the consistency regularizer pulls the
-    detection head's confidence sum toward that count.
-
-References:
-    - Ilse et al. 2018, "Attention-based Deep Multiple Instance Learning" -- the
-      gated attention pooling formulation used in AttnMILPool.
-    - Polski et al. 2020, "Classifying bacteria clones using attention-based
-      deep MIL" -- MIL precedent for bacteria classification.
-    - Related but distinct: NeGPR (2025) does graph-level pseudo-label
-      refinement for domain adaptation, not hypergraph-feature MIL for
-      single-domain detection.
+All hook and class machinery is module-level / pickleable so that
+torch.save(model) (used by Ultralytics for ckpt snapshots) succeeds.
 
 Usage:
     >>> from ultralytics import YOLO
@@ -48,17 +30,7 @@ import torch.nn.functional as F
 # ============================================================================
 
 class AttnMILPool(nn.Module):
-    """Gated attention pooling (Ilse et al. 2018) over spatial features.
-
-    Maps a 4D feature map [B, C, H, W] to a 2D pooled vector [B, C] using a
-    learned per-location attention weight (softmax over spatial positions).
-    Also returns the [B, H*W] attention map for visualization / consistency.
-
-    Gated attention formula:
-        a_i = w^T ( tanh(V z_i) ⊙ sigmoid(U z_i) )
-        α_i = softmax_i(a_i)
-        pooled = Σ_i α_i z_i
-    """
+    """Gated attention pooling (Ilse et al. 2018) over spatial features."""
 
     def __init__(self, channels: int, hidden: int = 128):
         super().__init__()
@@ -69,8 +41,8 @@ class AttnMILPool(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         B, C, H, W = x.shape
         z = x.flatten(2).transpose(1, 2)        # [B, N, C], N = H*W
-        u = torch.sigmoid(self.attn_U(z))        # [B, N, hidden]
-        v = torch.tanh(self.attn_V(z))           # [B, N, hidden]
+        u = torch.sigmoid(self.attn_U(z))
+        v = torch.tanh(self.attn_V(z))
         a = self.attn_w(u * v).squeeze(-1)       # [B, N]
         a = F.softmax(a, dim=1)
         pooled = (a.unsqueeze(2) * z).sum(dim=1) # [B, C]
@@ -78,10 +50,7 @@ class AttnMILPool(nn.Module):
 
 
 class HyperMILHead(nn.Module):
-    """MIL count prediction head: AttnMILPool + MLP -> non-negative count.
-
-    Output is constrained non-negative via Softplus.
-    """
+    """MIL count prediction: AttnMILPool + MLP -> non-negative count."""
 
     def __init__(self, channels: int, hidden: int = 128):
         super().__init__()
@@ -100,14 +69,29 @@ class HyperMILHead(nn.Module):
 
 
 # ============================================================================
+# Module-level state (pickle-safe -- not stored on model instance)
+# ============================================================================
+
+# Maps id(HyperACE module) -> last forward output. Hooks write here, loss
+# reads here. Module-level so it does NOT get pickled inside the model state
+# (each new Python process gets a fresh dict).
+_HYPERACE_OUTPUTS: dict[int, torch.Tensor] = {}
+
+
+def _hypermil_capture_hook(module, inputs, output):
+    """Top-level forward hook (pickleable). Stores output keyed by module id.
+
+    Top-level (not a closure) so that nn.Module._forward_hooks can be pickled
+    when Ultralytics calls torch.save(model) for checkpointing.
+    """
+    _HYPERACE_OUTPUTS[id(module)] = output
+
+
+# ============================================================================
 # Helpers
 # ============================================================================
 
-def _find_hyperace_layer(detection_model) -> tuple[int, nn.Module] | tuple[None, None]:
-    """Locate HyperACE / HyperACEScale in model.model Sequential.
-
-    Returns (layer_index, module) or (None, None) if not found.
-    """
+def _find_hyperace_layer(detection_model):
     try:
         from ultralytics.nn.modules.block import HyperACE, HyperACEScale
         targets = (HyperACE, HyperACEScale)
@@ -121,10 +105,6 @@ def _find_hyperace_layer(detection_model) -> tuple[int, nn.Module] | tuple[None,
 
 
 def _hyperace_out_channels(layer: nn.Module) -> int:
-    """Get output channel count of HyperACE-like layer.
-
-    HyperACE.cv2 is the final Conv block; its inner nn.Conv2d has out_channels = c2.
-    """
     return layer.cv2.conv.out_channels
 
 
@@ -135,18 +115,16 @@ def _hyperace_out_channels(layer: nn.Module) -> int:
 class HyperMILLoss:
     """Wraps base v8DetectionLoss with MIL count regression term.
 
-    Reads HyperACE feature map from `model_ref._hyperace_out` (captured by
-    forward hook), feeds it to `model_ref.mil_head`, computes Smooth-L1 loss
-    against per-image GT box count (from batch['batch_idx']).
-
-    Optional consistency regularizer: encourages sum of detection objectness
-    scores to match MIL-predicted count.
+    Pickle considerations: this is a top-level class. The instance stores
+    `self.base` (v8DetectionLoss instance) and `self.model_ref` (DetectionModel
+    instance). The model in turn stores `self.criterion = this` -- so the cycle
+    is `model.criterion.model_ref -> model`. Pickle handles cycles via memo,
+    so this is fine as long as nothing referenced is a local closure.
     """
 
     def __init__(self, base_criterion, model_ref):
         self.base = base_criterion
         self.model_ref = model_ref
-        # Inherit attrs the trainer / lr scheduler may poke
         self.device = base_criterion.device
         self.hyp = base_criterion.hyp
         if hasattr(base_criterion, "stride"):
@@ -156,57 +134,50 @@ class HyperMILLoss:
         # 1. Base detection loss (unchanged)
         base_total, base_items = self.base(preds, batch)
 
-        # 2. Hard skip MIL during validation/eval. torch.is_grad_enabled() is
-        #    False inside Validator.__call__ which wraps forward in no_grad(),
-        #    so this is the most robust train-vs-val signal.
+        # 2. Hard skip MIL during validation/eval (no_grad context)
         if not torch.is_grad_enabled():
-            # Clear stale cache so next train batch starts fresh
-            self.model_ref._hyperace_out = None
             return base_total, base_items
 
-        feat = getattr(self.model_ref, "_hyperace_out", None)
+        # 3. Retrieve cached HyperACE output via module-level dict
+        hid = getattr(self.model_ref, "_hypermil_hyperace_id", None)
+        if hid is None:
+            return base_total, base_items
+        feat = _HYPERACE_OUTPUTS.get(hid)
         if feat is None:
             return base_total, base_items
 
-        # 3. Guard against batch-size mismatch (e.g. stale cache from a
-        #    different-batch-size pass slipping through).
+        # 4. Guard against batch-size mismatch
         img = batch.get("img") if isinstance(batch, dict) else None
         if img is not None and feat.shape[0] != img.shape[0]:
-            self.model_ref._hyperace_out = None
             return base_total, base_items
 
-        # 4. MIL forward
-        mil_count, _ = self.model_ref.mil_head(feat)  # [B]
+        # 5. MIL forward
+        mil_count, _ = self.model_ref.mil_head(feat)
         B = feat.shape[0]
         device = mil_count.device
 
-        # 5. Target count per image from batch GT
+        # 6. Target count per image
         if "batch_idx" not in batch:
-            self.model_ref._hyperace_out = None
             return base_total, base_items
         bidx = batch["batch_idx"].view(-1).to(device)
         target_count = torch.zeros(B, device=device, dtype=mil_count.dtype)
-        # Vectorized count via scatter_add
         ones = torch.ones_like(bidx, dtype=mil_count.dtype)
         target_count.scatter_add_(0, bidx.long(), ones)
 
-        # 4. MIL count loss (Smooth L1 for robustness to outliers)
+        # 7. MIL count loss
         mil_loss = F.smooth_l1_loss(mil_count, target_count, beta=1.0)
 
-        # 5. Optional consistency loss
+        # 8. Optional consistency loss
         consist_w = getattr(self.model_ref, "consist_weight", 0.0)
         consist_loss = torch.tensor(0.0, device=device)
         if consist_w > 0:
-            # Soft "count" from detection: sum of sigmoid(class_logit) across anchors
             try:
                 feats = preds[1] if isinstance(preds, tuple) else preds
-                # feats is list of [B, no, H, W] per scale
-                # no = reg_max*4 + nc; take class portion (last nc channels)
                 nc = self.base.nc
                 cls_sums = []
                 for f in feats:
-                    cls = f[:, -nc:]                      # [B, nc, H, W]
-                    cls = cls.sigmoid().flatten(2).sum(dim=2).sum(dim=1)  # [B]
+                    cls = f[:, -nc:]
+                    cls = cls.sigmoid().flatten(2).sum(dim=2).sum(dim=1)
                     cls_sums.append(cls)
                 soft_count = sum(cls_sums)
                 consist_loss = F.smooth_l1_loss(soft_count, mil_count.detach(),
@@ -214,123 +185,138 @@ class HyperMILLoss:
             except Exception:
                 consist_loss = torch.tensor(0.0, device=device)
 
-        # 6. Combine
-        # base_total = sum(box, cls, dfl) * batch_size in v8DetectionLoss.
-        # Scale mil_loss similarly so weights compare consistently.
+        # 9. Combine. base_total = sum(box, cls, dfl) * batch_size. Scale
+        #    mil similarly for consistent weighting.
         mil_w = self.model_ref.mil_weight
         mil_scaled = mil_loss * B * mil_w
         consist_scaled = consist_loss * B * consist_w
 
         total = base_total + mil_scaled + consist_scaled
 
-        # 8. Track MIL stats on model for logging
+        # 10. Track stats
         self.model_ref._last_mil_loss = float(mil_loss.detach())
         self.model_ref._last_mil_count_mean = float(mil_count.mean().detach())
         self.model_ref._last_mil_target_mean = float(target_count.mean().detach())
         if consist_w > 0:
             self.model_ref._last_consist_loss = float(consist_loss.detach())
 
-        # Clear cache so next batch starts fresh (defensive)
-        self.model_ref._hyperace_out = None
-
         return total, base_items
 
 
 # ============================================================================
-# Install function (model-side)
+# DetectionModel subclass (pickle-safe init_criterion override)
+# ============================================================================
+
+# Lazy import / late binding for the parent class so this module can be
+# imported even if ultralytics isn't installed.
+def _get_hypermil_detection_class():
+    """Return HyperMILDetectionModel subclass of ultralytics DetectionModel.
+
+    Defined lazily because we need ultralytics imported. The returned class is
+    cached so all instances refer to the same class (important for pickle).
+    """
+    global _HyperMILDetectionModel
+    try:
+        return _HyperMILDetectionModel
+    except NameError:
+        pass
+    from ultralytics.nn.tasks import DetectionModel
+
+    class HyperMILDetectionModel(DetectionModel):
+        """DetectionModel that wraps init_criterion with HyperMILLoss.
+
+        Top-level class (defined at module import via _get_hypermil_detection_class).
+        Pickleable because it has a stable fully-qualified name once cached as
+        `afb_yolov13.hypermil._HyperMILDetectionModel`.
+        """
+
+        def init_criterion(self):
+            base = super().init_criterion()
+            return HyperMILLoss(base, self)
+
+    _HyperMILDetectionModel = HyperMILDetectionModel
+    # Make accessible by qualified name for pickle
+    HyperMILDetectionModel.__module__ = __name__
+    HyperMILDetectionModel.__qualname__ = "_HyperMILDetectionModel"
+    globals()["_HyperMILDetectionModel"] = HyperMILDetectionModel
+    return HyperMILDetectionModel
+
+
+# ============================================================================
+# Install function
 # ============================================================================
 
 def install_hypermil(detection_model, mil_weight: float = 0.5,
                     mil_hidden: int = 128, consist_weight: float = 0.0):
     """Install HyperMIL aux head + loss on a YOLOv13 DetectionModel.
 
-    Modifies in-place:
-        - detection_model.mil_head: HyperMILHead submodule (registered so it
-          gets included when the Trainer later builds the optimizer).
-        - detection_model._hyperace_out: storage for forward-hook captured tensor.
-        - detection_model.init_criterion: monkey-patched to lazily return a
-          HyperMILLoss wrapping the original criterion. Lazy so it's called
-          AFTER trainer sets model.args.
+    Pickle-safe: all stored attributes are either top-level objects or basic
+    types. No closures, no instance-attributed methods.
 
-    Args:
-        detection_model: ultralytics.nn.tasks.DetectionModel (model.model in
-            the YOLO wrapper). Must contain HyperACE or HyperACEScale.
-        mil_weight: Weight for MIL count loss.
-        mil_hidden: Hidden dim of MIL attention + MLP.
-        consist_weight: Weight for detection-MIL consistency regularizer
-            (0 disables, recommended start 0).
-
-    Note on callback timing:
-        Called from `on_pretrain_routine_start` BEFORE
-        trainer.set_model_attributes() which assigns model.args. We therefore
-        cannot call detection_model.init_criterion() directly here -- the
-        underlying v8DetectionLoss requires model.args. Instead we monkey-patch
-        init_criterion so it lazy-builds the wrapped criterion at first loss
-        call (by which time model.args is set).
+    Effects:
+      - detection_model.mil_head: HyperMILHead submodule.
+      - detection_model.mil_weight / consist_weight: floats.
+      - detection_model._hypermil_hyperace_id: int (id of HyperACE module).
+      - detection_model.__class__: swapped to HyperMILDetectionModel which
+        overrides init_criterion to wrap with HyperMILLoss at first .loss() call.
+      - HyperACE forward hook (top-level fn) writes to module-level
+        _HYPERACE_OUTPUTS dict, read by the loss wrapper.
 
     Returns:
-        detection_model (same instance, modified).
+        detection_model (modified in-place).
     """
     hidx, hlayer = _find_hyperace_layer(detection_model)
     if hlayer is None:
         raise ValueError(
-            "[HyperMIL] No HyperACE / HyperACEScale layer found in model. "
-            "HyperMIL requires a YOLOv13-style model with HyperACE in the head."
+            "[HyperMIL] No HyperACE / HyperACEScale layer found in model."
         )
     c_out = _hyperace_out_channels(hlayer)
     device = next(detection_model.parameters()).device
 
-    # 1. MIL head (registered submodule so it's auto-included in
-    #    model.parameters() when optimizer is built later by the trainer).
+    # 1. MIL head (registered submodule -> optimizer picks it up)
     detection_model.mil_head = HyperMILHead(c_out, mil_hidden).to(device)
     detection_model.mil_weight = float(mil_weight)
     detection_model.consist_weight = float(consist_weight)
-    detection_model._hyperace_out = None
+    detection_model._hypermil_hyperace_id = id(hlayer)
     detection_model._last_mil_loss = 0.0
     detection_model._last_mil_count_mean = 0.0
     detection_model._last_mil_target_mean = 0.0
 
-    # 2. Forward hook on HyperACE captures its output for the loss to read.
-    def _capture(_module, _inputs, output):
-        detection_model._hyperace_out = output
+    # 2. Forward hook -- TOP-LEVEL FN, pickleable
+    hlayer.register_forward_hook(_hypermil_capture_hook)
 
-    detection_model._hypermil_hook = hlayer.register_forward_hook(_capture)
+    # 3. Swap class so init_criterion is overridden (pickle-safe vs assigning
+    #    a closure to detection_model.init_criterion).
+    HyperMILDetectionModel = _get_hypermil_detection_class()
+    if not isinstance(detection_model, HyperMILDetectionModel):
+        # Check that base class is compatible (DetectionModel)
+        from ultralytics.nn.tasks import DetectionModel
+        if not isinstance(detection_model, DetectionModel):
+            raise TypeError(
+                f"[HyperMIL] Expected DetectionModel, got {type(detection_model).__name__}"
+            )
+        detection_model.__class__ = HyperMILDetectionModel
 
-    # 3. Monkey-patch init_criterion (lazy wrap).
-    #    Reset any cached criterion so the next loss() call re-inits via patch.
-    if hasattr(detection_model, "_hypermil_patched"):
-        # Already patched - skip to avoid double-wrapping.
-        print("[HyperMIL] init_criterion already patched; refreshing head/hook only.")
-        return detection_model
-
-    original_init_criterion = detection_model.init_criterion
-
-    def patched_init_criterion():
-        # At call time, trainer has set model.args; safe to build base criterion.
-        base = original_init_criterion()
-        return HyperMILLoss(base, detection_model)
-
-    detection_model.init_criterion = patched_init_criterion
-    detection_model._hypermil_patched = True
-    # Clear any previously-cached criterion so next .loss() call re-inits.
-    if hasattr(detection_model, "criterion"):
-        detection_model.criterion = None
+    # 4. Reset any cached criterion so next .loss() re-builds via overridden
+    #    init_criterion (HyperMILLoss).
+    detection_model.criterion = None
 
     n_mil_params = sum(p.numel() for p in detection_model.mil_head.parameters())
     print(
-        f"[HyperMIL] installed (lazy criterion):\n"
-        f"  HyperACE layer index : {hidx}\n"
+        f"[HyperMIL] installed (pickle-safe):\n"
+        f"  HyperACE layer index : {hidx}  (id={detection_model._hypermil_hyperace_id})\n"
         f"  HyperACE out channels: {c_out}\n"
         f"  MIL head params      : {n_mil_params:,}\n"
         f"  mil_weight           : {mil_weight}\n"
         f"  mil_hidden           : {mil_hidden}\n"
         f"  consist_weight       : {consist_weight}\n"
+        f"  model class -> {type(detection_model).__name__}\n"
     )
     return detection_model
 
 
 # ============================================================================
-# Callback factory (notebook-side)
+# Callback factory
 # ============================================================================
 
 def make_hypermil_callback(mil_weight: float = 0.5, mil_hidden: int = 128,
@@ -341,8 +327,7 @@ def make_hypermil_callback(mil_weight: float = 0.5, mil_hidden: int = 128,
         model.add_callback('on_pretrain_routine_start',
                            make_hypermil_callback(mil_weight=0.5))
 
-    Why on_pretrain_routine_start: fires BEFORE optimizer build, so MIL head
-    params are picked up by the optimizer.
+    Fires before optimizer build so MIL head params are picked up.
     """
 
     def _cb(trainer):
