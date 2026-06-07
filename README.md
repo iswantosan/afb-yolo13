@@ -283,9 +283,44 @@ Cell #20 training auto-register callback ke `on_pretrain_routine_start` — inst
 | mil1.0 | 1.0 | strong (risk: dominate det loss) |
 | mil0.5_c0.1 | 0.5 + consist 0.1 | with consistency regularizer |
 
+### v6 — YOLOv13s-Lite ([`configs/yolov13s-lite.yaml`](configs/yolov13s-lite.yaml)) — FPS angle
+
+**Strip HyperACE + FullPAD pathway** (responsible for ~30% FLOPs). Replace A2C2f blocks dengan C3k2 di backbone P4/P5. Tambah CBAM (channel + spatial attention) di tiap FPN/PAN block untuk compensate hilangnya capacity.
+
+**Paper angle:** Point-of-care TB detection on phone-camera microscopy. TB = WHO priority disease, deployment di rural/low-resource setting butuh real-time inference di edge hardware.
+
+**Defensible karena:** Bukan klaim novelty mechanism — klaim **engineered deployment variant** dengan benchmark FPS vs mAP trade-off. Reviewer Q2 standar buat deployment-focused paper.
+
+**Expected:**
+- Params: 6-7M (vs 9M baseline, -30%)
+- FLOPs: 12-14G (vs 21G, -35%)
+- FPS: 1.5-2x faster di A100, lebih besar di edge GPU
+- mAP: -1 to -2 acceptable trade-off
+
+### v7 — NWD hybrid box loss
+
+**[Normalized Wasserstein Distance](https://arxiv.org/abs/2110.13389)** (Wang et al. 2022) — treat box sebagai 2D Gaussian, bukan area IoU. Cocok untuk small + elongated objects (rod-shape AFB) karena gradient tetap mengalir bahkan saat boxes tidak overlap.
+
+**Implementation:** `BboxLoss` di-extend dengan hybrid term:
+```python
+loss = (1 - nwd_ratio) * (1 - CIoU) + nwd_ratio * (1 - NWD)
+```
+
+**Usage:** Pass `nwd_ratio=0.3` (atau 0.5) ke `model.train()`. `nwd_c=12.8` adalah normalization constant default dari paper.
+
+**Cost:** Zero arch change, zero FLOPs, zero params. Hanya 1 extra term di loss function.
+
+**Targets:** HIGH `LOSS_LOCALIZATION` flag (mAP drop 0.117 dari IoU 0.5 → 0.7). Expected +1-2 mAP50-95.
+
+**Paper claim:** "NWD loss targets the localization bottleneck specific to rod-shape ZN-stained bacilli." Real prior art (cited 200+ times), real mechanism, narrow application to AFB.
+
+### Combo (recommended for paper)
+
+**`yolov13s-lite.yaml` + `nwd_ratio=0.3`** = "Lightweight YOLOv13 with NWD loss for point-of-care AFB detection." FPS up + mAP trade-off mitigated by NWD localization quality. Defensible Q2 story.
+
 ### Future (TBD)
 
-- v6 — HyperMIL + best L3 module (e.g. rod + hypermil).
-- v7 — NWD loss combined with HyperMIL.
+- v8 — HyperMIL once debug resolved (image-level supervision for label noise).
+- v9 — TTA / SAHI tile-based inference for higher mAP at inference cost.
 
 Detail per-eksperimen tracked di W&B project `afb_yolov13_chen`, plus diagnose JSON per-run di `diag_<run_name>_val/`.

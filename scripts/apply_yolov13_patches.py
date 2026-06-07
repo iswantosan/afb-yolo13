@@ -32,6 +32,9 @@ PATCH_MAP = [
     ("ultralytics/nn/modules/block.py",     "block.py"),
     ("ultralytics/nn/modules/__init__.py",  "modules_init.py"),
     ("ultralytics/nn/tasks.py",             "tasks.py"),
+    ("ultralytics/utils/loss.py",           "loss.py"),         # NWD loss
+    ("ultralytics/cfg/default.yaml",        "default.yaml"),    # nwd_ratio/nwd_c defaults
+    ("ultralytics/cfg/__init__.py",         "cfg_init.py"),     # validator keys
 ]
 
 
