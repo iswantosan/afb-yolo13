@@ -209,9 +209,83 @@ pip install -e D:/Project/yolov13
 
 **Revert:** `python apply_yolov13_patches.py D:/Project/yolov13 --revert` (memulihkan `.orig` backups).
 
-### Future variants (TBD)
+### v5 — HyperMIL ([`afb_yolov13/hypermil.py`](afb_yolov13/hypermil.py))
 
-- v4d — Combine v4a + v4b atau v4a + v4c (kalau dua-duanya kasih signal positif).
-- v5 — Loss novelty (NWD / Inner-CIoU). FLOPs sama dengan baseline.
+**Hypergraph-backed Multiple Instance Learning auxiliary head + count loss.**
+
+Diagnose-driven response ke label noise (66% far hard-neg FP yang visually mostly real unlabeled bacilli). Bukan modifikasi arsitektur fundamental — tambah **auxiliary head** yang baca HyperACE output dan predict image-level bacilli count.
+
+#### Mechanism
+
+```
+HyperACE output (P4 res, e.g. 40×40, 512 ch)
+    │
+    └── AttnMILPool (gated attention pooling, Ilse et al. 2018)
+              │  α_i = softmax(w^T (tanh(V z_i) ⊙ sigmoid(U z_i)))
+              │  pooled = Σ_i α_i z_i
+              ▼
+       MLP(channels → hidden → 1) + Softplus
+              │
+              ▼
+        predicted count (non-negative scalar)
+
+Loss:
+    L_total = L_detection + λ_mil · SmoothL1(predicted_count, GT_count)
+    GT_count derived from batch['batch_idx'] (number of GT boxes per image)
+
+Optional:
+    + λ_consist · SmoothL1(Σ sigmoid(class_logits), predicted_count.detach())
+```
+
+#### Why this is genuinely novelty-defensible
+
+Berbeda dengan L1-L3 yang sebelumnya saya admit halu, HyperMIL punya pijakan:
+
+1. **Domain motivation eksplisit di literature**: TB MIL review (Sirinukunwattana et al., 2023) menyatakan "experts may mark only a few rod-shaped objects rather than marking every one of them... the level of granularity at which the label can be considered reliable is the image/patient itself" — directly match dengan masalah dataset Tuberculosis6208.
+2. **Mechanism not in YOLO literature**: MIL aux head pada YOLO-style detector dengan **hypergraph-enhanced features sebagai instance representation** belum saya temukan di prior art search (saya cek Polski 2020, NeGPR 2025, dan beberapa MIL-detection paper).
+3. **Targets actual bottleneck**: arch tweak (L1-L3) tidak akan break ceiling kalau bottleneck label noise. MIL targets label noise langsung.
+4. **Defensible claim**: "First HyperACE-feature MIL aux objective for sparsely-annotated AFB detection."
+
+#### Cost
+
+- **Params**: ~+150K (small MIL head: 2 linear + softplus MLP)
+- **FLOPs**: negligible (operates on HyperACE pooled output)
+- **Train time**: ~+5% (extra forward through MIL head + L1 loss)
+- **No YAML modification needed** — works with baseline `yolov13s.yaml` (atau varian arch lain seperti `yolov13s-rod.yaml`).
+- **No YOLOv13 source patch needed** — installed via Ultralytics callback.
+
+#### Usage (notebook)
+
+Toggle di cell #14 config:
+```python
+USE_HYPERMIL    = True
+MIL_WEIGHT      = 0.5          # main weight
+MIL_HIDDEN      = 128
+CONSIST_WEIGHT  = 0.0          # consistency regularizer (0 = off, recommended start)
+```
+
+Cell #20 training auto-register callback ke `on_pretrain_routine_start` — installs MIL head + replaces criterion sebelum optimizer dibuild.
+
+#### Diagnose
+
+[`scripts/diagnose_hypermil.py`](scripts/diagnose_hypermil.py) — visualize MIL attention heatmap + count vs GT scatter:
+- `MAE(pred_count, GT_count)`: kalau < 1.0 di val = MIL learned to count well.
+- Pearson `r` antara pred dan GT count.
+- Attention heatmap: should focus on bacilli regions, not background.
+
+#### Ablation matrix
+
+| Run | MIL Weight | Expected outcome |
+|---|---|---|
+| baseline | 0 | reference |
+| mil0.1 | 0.1 | light regularization |
+| **mil0.5** | **0.5** | **default, main result** |
+| mil1.0 | 1.0 | strong (risk: dominate det loss) |
+| mil0.5_c0.1 | 0.5 + consist 0.1 | with consistency regularizer |
+
+### Future (TBD)
+
+- v6 — HyperMIL + best L3 module (e.g. rod + hypermil).
+- v7 — NWD loss combined with HyperMIL.
 
 Detail per-eksperimen tracked di W&B project `afb_yolov13_chen`, plus diagnose JSON per-run di `diag_<run_name>_val/`.
