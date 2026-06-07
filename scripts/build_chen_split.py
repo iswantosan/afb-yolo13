@@ -32,7 +32,12 @@ def parse_voc_to_yolo(xml_path: Path, img_w: int, img_h: int) -> list[str]:
     root = tree.getroot()
     lines: list[str] = []
     for obj in root.iter("object"):
-        label_el = obj.find("label") or obj.find("name")
+        # NOTE: jangan pakai `find("label") or find("name")` -- ElementTree
+        # Element punya __bool__ berbasis jumlah child, jadi <label>TBbacillus</label>
+        # (no children, text only) evaluasi False. Pakai explicit None check.
+        label_el = obj.find("label")
+        if label_el is None:
+            label_el = obj.find("name")
         if label_el is None or label_el.text is None:
             continue
         label = label_el.text.strip()
@@ -87,12 +92,17 @@ def collect_pairs(src_dir: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
-def write_split(pairs: list[tuple[Path, Path]], out_split: Path) -> int:
-    """Copy images + write YOLO labels for one split. Returns number of pairs processed."""
+def write_split(pairs: list[tuple[Path, Path]], out_split: Path) -> tuple[int, int, int]:
+    """Copy images + write YOLO labels for one split.
+
+    Returns (n_pairs, n_total_boxes, n_empty_labels).
+    """
     img_out = out_split / "images"
     lbl_out = out_split / "labels"
     img_out.mkdir(parents=True, exist_ok=True)
     lbl_out.mkdir(parents=True, exist_ok=True)
+    n_total_boxes = 0
+    n_empty = 0
     for jpg, xml in pairs:
         # Copy image
         dst_img = img_out / jpg.name
@@ -107,7 +117,10 @@ def write_split(pairs: list[tuple[Path, Path]], out_split: Path) -> int:
         lines = parse_voc_to_yolo(xml, W, H)
         lbl_path = lbl_out / (jpg.stem + ".txt")
         lbl_path.write_text("\n".join(lines), encoding="utf-8")
-    return len(pairs)
+        n_total_boxes += len(lines)
+        if not lines:
+            n_empty += 1
+    return len(pairs), n_total_boxes, n_empty
 
 
 def main() -> None:
@@ -156,9 +169,23 @@ def main() -> None:
     # 4. Write splits
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    write_split(train_pairs, out / "train")
-    write_split(val_pairs, out / "val")
-    write_split(test_pairs, out / "test")
+    stats = {}
+    for name, ps in (("train", train_pairs), ("val", val_pairs), ("test", test_pairs)):
+        n_p, n_box, n_emp = write_split(ps, out / name)
+        stats[name] = (n_p, n_box, n_emp)
+
+    # Sanity: kalau ada empty labels banyak -> bug (mis. XML tag mismatch).
+    print("\nLabels written:")
+    for name, (n_p, n_box, n_emp) in stats.items():
+        avg = n_box / max(n_p, 1)
+        print(f"  {name:5s}: pairs={n_p:5d}  total_boxes={n_box:6d}  "
+              f"avg/img={avg:5.1f}  empty_labels={n_emp}")
+    if any(stats[s][2] > 0.5 * stats[s][0] for s in stats):
+        print("\n[WARN] >50% labels are empty - likely XML parse bug. "
+              "Check class names di CLASS_MAP.")
+    if any(stats[s][1] == 0 for s in stats):
+        sys.exit("\n[FATAL] one or more split has 0 boxes - aborting. "
+                 "Fix the XML parse logic and re-run.")
 
     # 5. data.yaml
     yaml_path = out / "data.yaml"
