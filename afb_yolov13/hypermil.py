@@ -227,9 +227,12 @@ def install_hypermil(detection_model, mil_weight: float = 0.5,
     """Install HyperMIL aux head + loss on a YOLOv13 DetectionModel.
 
     Modifies in-place:
-        - detection_model.mil_head: HyperMILHead instance.
-        - detection_model._hyperace_out: stores forward-hook captured tensor.
-        - detection_model.criterion: replaced with HyperMILLoss wrapper.
+        - detection_model.mil_head: HyperMILHead submodule (registered so it
+          gets included when the Trainer later builds the optimizer).
+        - detection_model._hyperace_out: storage for forward-hook captured tensor.
+        - detection_model.init_criterion: monkey-patched to lazily return a
+          HyperMILLoss wrapping the original criterion. Lazy so it's called
+          AFTER trainer sets model.args.
 
     Args:
         detection_model: ultralytics.nn.tasks.DetectionModel (model.model in
@@ -238,6 +241,14 @@ def install_hypermil(detection_model, mil_weight: float = 0.5,
         mil_hidden: Hidden dim of MIL attention + MLP.
         consist_weight: Weight for detection-MIL consistency regularizer
             (0 disables, recommended start 0).
+
+    Note on callback timing:
+        Called from `on_pretrain_routine_start` BEFORE
+        trainer.set_model_attributes() which assigns model.args. We therefore
+        cannot call detection_model.init_criterion() directly here -- the
+        underlying v8DetectionLoss requires model.args. Instead we monkey-patch
+        init_criterion so it lazy-builds the wrapped criterion at first loss
+        call (by which time model.args is set).
 
     Returns:
         detection_model (same instance, modified).
@@ -251,7 +262,8 @@ def install_hypermil(detection_model, mil_weight: float = 0.5,
     c_out = _hyperace_out_channels(hlayer)
     device = next(detection_model.parameters()).device
 
-    # 1. MIL head
+    # 1. MIL head (registered submodule so it's auto-included in
+    #    model.parameters() when optimizer is built later by the trainer).
     detection_model.mil_head = HyperMILHead(c_out, mil_hidden).to(device)
     detection_model.mil_weight = float(mil_weight)
     detection_model.consist_weight = float(consist_weight)
@@ -260,21 +272,35 @@ def install_hypermil(detection_model, mil_weight: float = 0.5,
     detection_model._last_mil_count_mean = 0.0
     detection_model._last_mil_target_mean = 0.0
 
-    # 2. Forward hook on HyperACE
+    # 2. Forward hook on HyperACE captures its output for the loss to read.
     def _capture(_module, _inputs, output):
         detection_model._hyperace_out = output
 
     detection_model._hypermil_hook = hlayer.register_forward_hook(_capture)
 
-    # 3. Replace criterion with HyperMIL wrapper
-    if getattr(detection_model, "criterion", None) is None:
-        detection_model.criterion = detection_model.init_criterion()
-    base_criterion = detection_model.criterion
-    detection_model.criterion = HyperMILLoss(base_criterion, detection_model)
+    # 3. Monkey-patch init_criterion (lazy wrap).
+    #    Reset any cached criterion so the next loss() call re-inits via patch.
+    if hasattr(detection_model, "_hypermil_patched"):
+        # Already patched - skip to avoid double-wrapping.
+        print("[HyperMIL] init_criterion already patched; refreshing head/hook only.")
+        return detection_model
+
+    original_init_criterion = detection_model.init_criterion
+
+    def patched_init_criterion():
+        # At call time, trainer has set model.args; safe to build base criterion.
+        base = original_init_criterion()
+        return HyperMILLoss(base, detection_model)
+
+    detection_model.init_criterion = patched_init_criterion
+    detection_model._hypermil_patched = True
+    # Clear any previously-cached criterion so next .loss() call re-inits.
+    if hasattr(detection_model, "criterion"):
+        detection_model.criterion = None
 
     n_mil_params = sum(p.numel() for p in detection_model.mil_head.parameters())
     print(
-        f"[HyperMIL] installed:\n"
+        f"[HyperMIL] installed (lazy criterion):\n"
         f"  HyperACE layer index : {hidx}\n"
         f"  HyperACE out channels: {c_out}\n"
         f"  MIL head params      : {n_mil_params:,}\n"
