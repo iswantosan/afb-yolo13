@@ -1,0 +1,69 @@
+# YOLOv13s + SpatialFullPAD_Tunnel — content-aware spatial gating.
+#
+# Replaces all FullPAD_Tunnel (layers 12, 13, 14, 18, 23, 27, 31) with
+# SpatialFullPAD_Tunnel. The 7 scalar gates become 7 spatial gates (each
+# predicting a 1-channel [B, 1, H, W] map from concat of input pair).
+#
+# Motivation:
+#   Baseline FullPAD_Tunnel gate is a global scalar. Useful when ALL spatial
+#   locations need HyperACE enhancement equally. For sparse-positive scenes
+#   (microscopy: most of frame is background, bacilli clustered), uniform
+#   enhancement may average out useful local signal. Spatial gate enables
+#   enhancement only in regions where it matters.
+#
+# Cost vs baseline:
+#   Params: per tunnel adds (2C -> C/8 -> 1) 1x1 convs + bias.
+#           For 7 tunnels with avg C~256-1024, total ~150-300K extra params.
+#   FLOPs : 1x1 conv on concat inputs at full spatial res. Modest add.
+#
+# Pretrained yolov13s.pt: tunnel gate is new module structure -> all 7 tunnel
+#   weights re-init. Backbone + HyperACE + PAN + Detect load OK.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0  P1/2
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1  P2/4
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3  P3/8
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5  P4/16
+  - [-1, 4, A2C2f,   [512, True, 4]]              # 6
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7  P5/32
+  - [-1, 4, A2C2f,   [1024, True, 1]]             # 8
+
+head:
+  - [[4, 6, 8], 2, HyperACE, [512, 8, True, True, 0.5, 1, "both"]]   # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 10
+  - [9, 1, DownsampleConv, []]                                       # 11
+  - [[6, 9],  1, SpatialFullPAD_Tunnel, []]                          # 12
+  - [[4, 10], 1, SpatialFullPAD_Tunnel, []]                          # 13
+  - [[8, 11], 1, SpatialFullPAD_Tunnel, []]                          # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 15
+  - [[-1, 12], 1, Concat, [1]]                                       # 16
+  - [-1, 2, DSC3k2, [512, True]]                                     # 17
+  - [[-1, 9], 1, SpatialFullPAD_Tunnel, []]                          # 18
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                       # 19
+  - [[-1, 13], 1, Concat, [1]]                                       # 20
+  - [-1, 2, DSC3k2, [256, True]]                                     # 21
+  - [10, 1, Conv, [256, 1, 1]]                                       # 22
+  - [[21, 22], 1, SpatialFullPAD_Tunnel, []]                         # 23
+
+  - [-1, 1, Conv, [256, 3, 2]]                                       # 24
+  - [[-1, 18], 1, Concat, [1]]                                       # 25
+  - [-1, 2, DSC3k2, [512, True]]                                     # 26
+  - [[-1, 9], 1, SpatialFullPAD_Tunnel, []]                          # 27
+
+  - [26, 1, Conv, [512, 3, 2]]                                       # 28
+  - [[-1, 14], 1, Concat, [1]]                                       # 29
+  - [-1, 2, DSC3k2, [1024, True]]                                    # 30
+  - [[-1, 11], 1, SpatialFullPAD_Tunnel, []]                         # 31
+
+  - [[23, 27, 31], 1, Detect, [nc]]                                  # 32  Detect(P3, P4, P5)

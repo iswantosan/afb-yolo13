@@ -1,0 +1,70 @@
+# YOLOv13s + RodDSC3k2 in head — asymmetric rod-shape convolution.
+#
+# Replaces head DSC3k2 (layers 17, 21, 26, 30) with RodDSC3k2 (parallel
+# horizontal/vertical/isotropic depthwise branches).
+#
+# Targets: elongated rod-shape bacilli (ZN-stain AFB, ~4-8:1 aspect, arbitrary
+# orientation in phone-camera microscopy). Standard symmetric DSConv (3x3, 5x5,
+# 7x7) wastes capacity smoothing non-matching directions. Rod kernels (1xk + kx1)
+# capture both elongation axes efficiently.
+#
+# Backbone keeps stock DSC3k2 (backbone features are general, no need for
+# domain-specific rod prior at feature extraction stage).
+#
+# Cost vs baseline:
+#   Params: roughly comparable (depthwise rod kernels are 1xk + kx1 + 3x3 vs
+#           single 3x3 + 7x7 in baseline DSBottleneck). Slight increase.
+#   FLOPs : roughly comparable, parallel branches sum cheap.
+#
+# Pretrained yolov13s.pt: head DSC3k2 weights shape-mismatch (RodDSC3k2 is a
+#   different class structure) -> head layers re-init from scratch. Backbone
+#   + HyperACE + FullPAD + PAN structure load OK.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0  P1/2
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1  P2/4
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3  P3/8
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5  P4/16
+  - [-1, 4, A2C2f,   [512, True, 4]]              # 6
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7  P5/32
+  - [-1, 4, A2C2f,   [1024, True, 1]]             # 8
+
+head:
+  - [[4, 6, 8], 2, HyperACE, [512, 8, True, True, 0.5, 1, "both"]]   # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 10
+  - [9, 1, DownsampleConv, []]                                       # 11
+  - [[6, 9],  1, FullPAD_Tunnel, []]                                 # 12
+  - [[4, 10], 1, FullPAD_Tunnel, []]                                 # 13
+  - [[8, 11], 1, FullPAD_Tunnel, []]                                 # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 15
+  - [[-1, 12], 1, Concat, [1]]                                       # 16
+  - [-1, 2, RodDSC3k2, [512, True, 0.5, 1, 5]]                       # 17  rod k=5
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 18
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                       # 19
+  - [[-1, 13], 1, Concat, [1]]                                       # 20
+  - [-1, 2, RodDSC3k2, [256, True, 0.5, 1, 5]]                       # 21  rod k=5
+  - [10, 1, Conv, [256, 1, 1]]                                       # 22
+  - [[21, 22], 1, FullPAD_Tunnel, []]                                # 23
+
+  - [-1, 1, Conv, [256, 3, 2]]                                       # 24
+  - [[-1, 18], 1, Concat, [1]]                                       # 25
+  - [-1, 2, RodDSC3k2, [512, True, 0.5, 1, 5]]                       # 26  rod k=5
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 27
+
+  - [26, 1, Conv, [512, 3, 2]]                                       # 28
+  - [[-1, 14], 1, Concat, [1]]                                       # 29
+  - [-1, 2, RodDSC3k2, [1024, True, 0.5, 1, 5]]                      # 30  rod k=5
+  - [[-1, 11], 1, FullPAD_Tunnel, []]                                # 31
+
+  - [[23, 27, 31], 1, Detect, [nc]]                                  # 32  Detect(P3, P4, P5)

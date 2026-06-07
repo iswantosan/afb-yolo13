@@ -160,9 +160,58 @@ Targets YOLOv13-spesifik tweak — perkaya HyperACE high-order modeling untuk da
 **Unchanged:** Backbone, FullPAD, PAN, Detect, kernel sizes.
 **Cost:** ~+50K params di HyperACE, FLOPs marginal naik di AdaHGConv.
 
+### v4 — L3 new modules (real arch novelty, requires YOLOv13 patches)
+
+Tiga modul baru ditambah ke YOLOv13 source (lihat [`yolov13_patches/`](yolov13_patches/) + [`scripts/apply_yolov13_patches.py`](scripts/apply_yolov13_patches.py)):
+
+#### v4a — `RodDSC3k2` ([`configs/yolov13s-rod.yaml`](configs/yolov13s-rod.yaml))
+
+**Module:** `RodDSBottleneck` — parallel rod-shape depthwise:
+```
+   ┌─ dw_h (1×5) ──┐
+input ┼─ dw_v (5×1) ─┼─ sum → BN → SiLU → 1×1 proj → +residual
+   └─ dw_s (3×3) ──┘
+```
+
+**Motivation:** Bacilli ZN-stain = elongated rod ~4–8:1 aspect, arbitrary orientation. Symmetric depthwise (3×3, 7×7) waste capacity smoothing non-matching directions. Asymmetric rod kernels match shape prior.
+
+**Paper claim:** "Morphology-aware bottleneck for elongated AFB detection."
+
+#### v4b — `SpatialFullPAD_Tunnel` ([`configs/yolov13s-spgate.yaml`](configs/yolov13s-spgate.yaml))
+
+**Module:** Replaces all 7 `FullPAD_Tunnel` scalar gates dengan content-aware spatial gates:
+```python
+gate = sigmoid(conv1x1(concat([x_orig, x_enhanced])))  # [B, 1, H, W]
+output = x_orig + gate * x_enhanced
+```
+
+**Motivation:** Baseline FullPAD applies enhancement uniformly. Untuk sparse-positive scenes (microscopy: mostly background), uniform enhancement averages out useful local signal. Spatial gate = enhancement selektif.
+
+**Paper claim:** "Spatial-adaptive cross-pipeline aggregation for selective enhancement."
+
+#### v4c — `HyperACEScale` ([`configs/yolov13s-scfuse.yaml`](configs/yolov13s-scfuse.yaml))
+
+**Module:** Replaces `FuseModule` di HyperACE dengan `ScaleAwareFuseModule` — learnable per-scale (P3/P4/P5) channel embedding di-inject sebelum fusion. Scale identity prior propagates to AdaHyperedgeGen → implicit scale-conditioned prototypes.
+
+**Motivation:** Baseline FuseModule strip scale identity post-concat. AdaHyperedgeGen treat tokens scale-agnostic. Scale-aware embedding restores scale prior tanpa eksplisit per-vertex scale_ids.
+
+**Paper claim:** "Scale-conditioned adaptive hypergraph via channel-wise scale embeddings."
+
+### Setup for L3 variants
+
+**Colab (auto):** Patch script runs at cell #4 setelah `git clone iMoonLab/yolov13`. Idempotent.
+
+**Local Windows:** Patches sudah diterapkan ke `D:/Project/yolov13/` (lihat `yolov13_patches/` di repo afb-yolo13 untuk source-of-truth). Untuk re-apply:
+```powershell
+python D:/Project/afb-yolo13/scripts/apply_yolov13_patches.py D:/Project/yolov13
+pip install -e D:/Project/yolov13
+```
+
+**Revert:** `python apply_yolov13_patches.py D:/Project/yolov13 --revert` (memulihkan `.orig` backups).
+
 ### Future variants (TBD)
 
-- v3c — Combine v3a + v3b (kalau dua-duanya kasih signal).
-- v4 — Loss novelty (NWD / Inner-CIoU). FLOPs sama dengan baseline.
+- v4d — Combine v4a + v4b atau v4a + v4c (kalau dua-duanya kasih signal positif).
+- v5 — Loss novelty (NWD / Inner-CIoU). FLOPs sama dengan baseline.
 
 Detail per-eksperimen tracked di W&B project `afb_yolov13_chen`, plus diagnose JSON per-run di `diag_<run_name>_val/`.

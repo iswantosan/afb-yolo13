@@ -1,0 +1,77 @@
+# YOLOv13s + HyperACEScale — scale-aware HyperACE with per-scale embeddings.
+#
+# Replaces HyperACE (layer 9) with HyperACEScale, which uses ScaleAwareFuseModule
+# internally. ScaleAwareFuseModule injects learnable per-scale (P3/P4/P5)
+# channel-wise embeddings before fusing the three input feature maps.
+#
+# Motivation:
+#   Baseline FuseModule concatenates downsampled-P3, P4, upsampled-P5 channels
+#   then projects. After fusion, scale identity is lost. AdaHyperedgeGen learns
+#   prototypes from a scale-agnostic vertex set.
+#
+#   ScaleAwareFuseModule adds a learnable [3, c_in, 1, 1] embedding parameter,
+#   broadcasting per-scale channel biases before fusion. Downstream C3AH
+#   branches (which contain AdaHyperedgeGen) can learn to specialize different
+#   hyperedges for different scale-conditioned patterns implicitly via the
+#   per-channel scale prior.
+#
+# Cost vs baseline (scale s):
+#   Params: +3 * c_in * 1 * 1 in ScaleAwareFuseModule (negligible, ~768 for
+#           c_in=256).
+#   FLOPs:  +negligible (additive bias broadcast).
+#
+# Pretrained yolov13s.pt:
+#   HyperACEScale has different FuseModule class -> HyperACE.fuse weights
+#   shape compatible but scale_embed is new -> partial load (fuse.conv_out
+#   loads OK, scale_embed initializes from random small noise). C3AH branches
+#   load OK.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0  P1/2
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1  P2/4
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3  P3/8
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5  P4/16
+  - [-1, 4, A2C2f,   [512, True, 4]]              # 6
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7  P5/32
+  - [-1, 4, A2C2f,   [1024, True, 1]]             # 8
+
+head:
+  # Scale-aware HyperACE — only change vs baseline
+  - [[4, 6, 8], 2, HyperACEScale, [512, 8, True, True, 0.5, 1, "both"]]  # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                            # 10
+  - [9, 1, DownsampleConv, []]                                            # 11
+  - [[6, 9],  1, FullPAD_Tunnel, []]                                      # 12
+  - [[4, 10], 1, FullPAD_Tunnel, []]                                      # 13
+  - [[8, 11], 1, FullPAD_Tunnel, []]                                      # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                            # 15
+  - [[-1, 12], 1, Concat, [1]]                                            # 16
+  - [-1, 2, DSC3k2, [512, True]]                                          # 17
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                      # 18
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                            # 19
+  - [[-1, 13], 1, Concat, [1]]                                            # 20
+  - [-1, 2, DSC3k2, [256, True]]                                          # 21
+  - [10, 1, Conv, [256, 1, 1]]                                            # 22
+  - [[21, 22], 1, FullPAD_Tunnel, []]                                     # 23
+
+  - [-1, 1, Conv, [256, 3, 2]]                                            # 24
+  - [[-1, 18], 1, Concat, [1]]                                            # 25
+  - [-1, 2, DSC3k2, [512, True]]                                          # 26
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                      # 27
+
+  - [26, 1, Conv, [512, 3, 2]]                                            # 28
+  - [[-1, 14], 1, Concat, [1]]                                            # 29
+  - [-1, 2, DSC3k2, [1024, True]]                                         # 30
+  - [[-1, 11], 1, FullPAD_Tunnel, []]                                     # 31
+
+  - [[23, 27, 31], 1, Detect, [nc]]                                       # 32  Detect(P3, P4, P5)
