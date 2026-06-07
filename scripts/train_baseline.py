@@ -68,7 +68,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="path to data.yaml from build_chen_split")
     ap.add_argument("--model", default="yolov13s",
-                    choices=list(YOLOV13_WEIGHT_URLS.keys()))
+                    help=("yolov13n/s/l/x (auto-download pretrained), "
+                          "OR absolute path to custom YAML (e.g. configs/yolov13s-p2.yaml)"))
+    ap.add_argument("--pretrained", default=None,
+                    help="override pretrained .pt key (default: derive from --model, "
+                         "fallback yolov13s for custom YAML)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--imgsz", type=int, default=640)
@@ -82,28 +86,49 @@ def main() -> None:
                     help="enable W&B logging dgn project name")
     args = ap.parse_args()
 
-    # Validate
+    # Validate later after resolving model spec
     data_path = Path(args.data)
     if not data_path.exists():
         sys.exit(f"data.yaml not found: {data_path}")
 
+    # Resolve model spec
+    # Two modes:
+    #   (a) standard scale name: --model yolov13s -> yolov13s.yaml + yolov13s.pt
+    #   (b) custom YAML path  : --model /path/to/yolov13s-p2.yaml + pretrained yolov13s.pt
+    if args.model in YOLOV13_WEIGHT_URLS:
+        model_yaml = f"{args.model}.yaml"
+        pretrained_key = args.pretrained or args.model
+        model_stem = args.model
+    else:
+        custom_yaml = Path(args.model).resolve()
+        if not custom_yaml.exists():
+            sys.exit(f"Custom model YAML not found: {custom_yaml}")
+        model_yaml = str(custom_yaml)
+        # Default pretrained = yolov13s.pt (most common partial-load source)
+        pretrained_key = args.pretrained or "yolov13s"
+        if pretrained_key not in YOLOV13_WEIGHT_URLS:
+            sys.exit(f"Unknown --pretrained {pretrained_key}; "
+                     f"valid: {list(YOLOV13_WEIGHT_URLS.keys())}")
+        model_stem = custom_yaml.stem
+
     # Auto run name
-    run_name = args.name or f"{args.model}_seed{args.seed}_{args.epochs}ep"
+    run_name = args.name or f"{model_stem}_seed{args.seed}_{args.epochs}ep"
     print(f"\n=== Run config ===")
-    print(f"  model    : {args.model}")
-    print(f"  data     : {data_path}")
-    print(f"  seed     : {args.seed}")
-    print(f"  epochs   : {args.epochs}")
-    print(f"  imgsz    : {args.imgsz}")
-    print(f"  batch    : {args.batch}")
-    print(f"  device   : {args.device}")
-    print(f"  run_name : {run_name}")
+    print(f"  model_yaml: {model_yaml}")
+    print(f"  pretrained: {pretrained_key}.pt")
+    print(f"  data      : {data_path}")
+    print(f"  seed      : {args.seed}")
+    print(f"  epochs    : {args.epochs}")
+    print(f"  imgsz     : {args.imgsz}")
+    print(f"  batch     : {args.batch}")
+    print(f"  device    : {args.device}")
+    print(f"  run_name  : {run_name}")
 
     # Seed
     set_global_seed(args.seed)
 
     # Pretrained
-    pt_path = ensure_pretrained(args.model, Path(args.weights_dir))
+    pt_path = ensure_pretrained(pretrained_key, Path(args.weights_dir))
 
     # Lazy import after seed set
     from ultralytics import YOLO
@@ -124,19 +149,17 @@ def main() -> None:
             name=run_name,
             reinit=True,
             config=dict(
-                model=args.model, data=str(data_path), pretrained=str(pt_path),
+                model_yaml=model_yaml, pretrained=str(pt_path),
+                data=str(data_path),
                 seed=args.seed, epochs=args.epochs, imgsz=args.imgsz,
                 batch=args.batch, optimizer="SGD", lr0=0.01, momentum=0.937,
                 cos_lr=True, split="chen_1024_140_101", split_seed=42,
             ),
-            tags=[args.model, f"seed{args.seed}", "chen_split", "baseline"],
+            tags=[model_stem, f"seed{args.seed}", "chen_split"],
         )
         print(f"W&B run: {run.url}")
 
     # Build model from YAML + load pretrained
-    # YOLOv13 yaml: ultralytics/cfg/models/v13/yolov13.yaml (scale ditentukan dari
-    # nama pretrained: yolov13s.pt -> scale 's').
-    model_yaml = f"{args.model}.yaml"
     model = YOLO(model_yaml)
     try:
         model.load(str(pt_path))

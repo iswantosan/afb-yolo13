@@ -90,10 +90,50 @@ Output:
 - per-scale recall (P3/P4/P5)
 - recommendation tag (e.g., "fix-localization", "fix-fp", "arch-add-p2")
 
-## Architectural improvement (next step)
+## Experiments
 
-Setelah baseline diukur, target arch novelty (lihat diagnose output):
-- Diagnose-driven: kalau P3 recall rendah → P2 head; kalau FP-near tinggi → localization (NWD / Inner-CIoU); kalau FullPAD gates dead → arch redesign.
-- Kandidat (kombinasi narrow, bukan first-claim): Scale-Conditioned Hyperedge, Spatial-gated FullPAD, NWD loss, small-obj copy-paste.
+### v1 — Baseline (`yolov13s.yaml`)
 
-Detail per-mekanisme + ablation di branch `dev/*` (TBD).
+```powershell
+# di notebook, pilih:
+MODEL_CFG = 'yolov13s.yaml'
+```
+
+| Split | mAP50 | mAP50-95 | mAP@0.9 | P | R |
+|---|---|---|---|---|---|
+| val | 0.835 | 0.415 | — | 0.762 | 0.767 |
+| test | 0.877 | 0.428 | 0.003 | 0.816 | 0.786 |
+
+Diagnose flags (baseline val):
+- **HIGH** `LOSS_LOCALIZATION` — mAP drop 0.117 dari IoU 0.5 → 0.7. Banyak prediksi tidak presisi (mAP@0.9 ≈ 0).
+- **HIGH** `HARD_NEG_FP` — 66.9% FPs jauh dari GT (sebagian besar kemungkinan label noise, lihat label-quality probe).
+- FullPAD gates: **HEALTHY** (mean |g| = 0.152, 0/7 dead) → tidak perlu redesign HyperACE pathway.
+
+### v2 — P2 detection head ([`configs/yolov13s-p2.yaml`](configs/yolov13s-p2.yaml))
+
+Diagnose-driven response ke `LOSS_LOCALIZATION` flag:
+- Tambah detection head di stride 4 (feature map 160×160 @ imgsz 640) → resolusi lebih tinggi untuk small bacilli.
+- FPN top-down diperpanjang P5 → P4 → P3 → **P2** (cat backbone P2 dari layer 2).
+- PAN bottom-up dimulai dari P2 → P3 → P4 → P5 (refresh semua skala).
+- HyperACE + FullPAD path **tidak diubah** (gates sehat, jangan ganggu).
+
+```python
+MODEL_CFG = str(REPO_DIR / 'configs' / 'yolov13s-p2.yaml')
+```
+
+Pretrained `yolov13s.pt` di-load partial:
+- ✓ backbone (layer 0-8)
+- ✓ HyperACE + FullPAD distribution (layer 9-14)
+- ✓ FPN P3/P4/P5 path (layer 15-23)
+- ✗ P2 extension (layer 24-26) — init dari scratch
+- ✗ PAN bottom-up (layer 27-37) — init dari scratch
+- ✗ Detect head 4-output — init dari scratch (mismatch dgn yolov13s.pt 3-output)
+
+Expected cost: ~+10–15% params, ~+30–40% FLOPs, ~+25–35% train time vs baseline.
+
+### Future variants (TBD)
+
+- v3 — `yolov13s-p2-nwd.yaml`: P2 head + NWD loss (`nwd_ratio=0.5`) untuk localization gain lebih lanjut.
+- v4 — Hyperedge scale-conditioned (eksperimen arsitektur HyperACE itu sendiri).
+
+Detail per-eksperimen tracked di W&B project `afb_yolov13_chen`, plus diagnose JSON per-run di `diag_<run_name>_val/`.
