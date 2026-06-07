@@ -78,6 +78,9 @@ class HyperMILHead(nn.Module):
 _HYPERACE_OUTPUTS: dict[int, torch.Tensor] = {}
 
 
+_HOOK_FIRE_COUNT = [0]
+
+
 def _hypermil_capture_hook(module, inputs, output):
     """Top-level forward hook (pickleable). Stores output keyed by module id.
 
@@ -85,6 +88,14 @@ def _hypermil_capture_hook(module, inputs, output):
     when Ultralytics calls torch.save(model) for checkpointing.
     """
     _HYPERACE_OUTPUTS[id(module)] = output
+    _HOOK_FIRE_COUNT[0] += 1
+    if _HOOK_FIRE_COUNT[0] <= 3:
+        try:
+            shape = tuple(output.shape)
+        except Exception:
+            shape = "?"
+        print(f"[HyperMIL-debug hook#{_HOOK_FIRE_COUNT[0]}] "
+              f"id={id(module)} output_shape={shape}")
 
 
 # ============================================================================
@@ -122,6 +133,19 @@ class HyperMILLoss:
     so this is fine as long as nothing referenced is a local closure.
     """
 
+    # Class-level diagnostic counters (shared across all instances). The user
+    # can `print(HyperMILLoss._guard_log)` after training to see which guard
+    # tripped how many times.
+    _guard_log = {
+        "total_calls": 0,
+        "skipped_no_grad": 0,
+        "skipped_no_hid": 0,
+        "skipped_no_feat": 0,
+        "skipped_batch_mismatch": 0,
+        "skipped_no_batch_idx": 0,
+        "mil_computed": 0,
+    }
+
     def __init__(self, base_criterion, model_ref):
         self.base = base_criterion
         self.model_ref = model_ref
@@ -131,24 +155,51 @@ class HyperMILLoss:
             self.stride = base_criterion.stride
 
     def __call__(self, preds, batch):
+        # Diagnostic counter
+        HyperMILLoss._guard_log["total_calls"] += 1
+        call_n = HyperMILLoss._guard_log["total_calls"]
+        verbose = call_n <= 3  # log first 3 calls in detail
+
         # 1. Base detection loss (unchanged)
         base_total, base_items = self.base(preds, batch)
 
+        if verbose:
+            print(f"[HyperMIL-debug call#{call_n}] "
+                  f"grad_enabled={torch.is_grad_enabled()} "
+                  f"model.training={self.model_ref.training}")
+
         # 2. Hard skip MIL during validation/eval (no_grad context)
         if not torch.is_grad_enabled():
+            HyperMILLoss._guard_log["skipped_no_grad"] += 1
+            if verbose:
+                print(f"[HyperMIL-debug call#{call_n}] SKIP: no_grad context")
             return base_total, base_items
 
         # 3. Retrieve cached HyperACE output via module-level dict
         hid = getattr(self.model_ref, "_hypermil_hyperace_id", None)
         if hid is None:
+            HyperMILLoss._guard_log["skipped_no_hid"] += 1
+            if verbose:
+                print(f"[HyperMIL-debug call#{call_n}] SKIP: no _hypermil_hyperace_id")
             return base_total, base_items
         feat = _HYPERACE_OUTPUTS.get(hid)
+        if verbose:
+            print(f"[HyperMIL-debug call#{call_n}] "
+                  f"hid={hid} feat_present={feat is not None} "
+                  f"outputs_keys={list(_HYPERACE_OUTPUTS.keys())}")
         if feat is None:
+            HyperMILLoss._guard_log["skipped_no_feat"] += 1
+            if verbose:
+                print(f"[HyperMIL-debug call#{call_n}] SKIP: feat is None")
             return base_total, base_items
 
         # 4. Guard against batch-size mismatch
         img = batch.get("img") if isinstance(batch, dict) else None
         if img is not None and feat.shape[0] != img.shape[0]:
+            HyperMILLoss._guard_log["skipped_batch_mismatch"] += 1
+            if verbose:
+                print(f"[HyperMIL-debug call#{call_n}] SKIP: feat.shape[0]="
+                      f"{feat.shape[0]} != img.shape[0]={img.shape[0]}")
             return base_total, base_items
 
         # 5. MIL forward
