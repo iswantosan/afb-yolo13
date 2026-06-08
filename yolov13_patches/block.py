@@ -2193,3 +2193,112 @@ class MambaC2f(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(m(y[-1]) for m in self.m)
         return self.cv2(torch.cat(y, 1))
+
+
+# ============================================================================
+# AFB-YOLOv13: SimAM + EMA Attention + DCN (real prior art, verified)
+#
+# SimAM:  Yang et al. ICML 2021 — parameter-free 3D attention
+# EMA:    Ouyang et al. ICASSP 2023 (arXiv:2305.13563) — efficient multi-scale
+# DCNv2:  Zhu et al. CVPR 2019 — modulated deformable conv (torchvision.ops)
+# ============================================================================
+
+class SimAM(nn.Module):
+    """SimAM: parameter-free 3D attention (Yang et al. ICML 2021).
+
+    Energy-function based; zero learnable parameters. Drop-in attention.
+    """
+
+    def __init__(self, c1=None, lambda_: float = 1e-4):
+        super().__init__()
+        self.lambda_ = lambda_
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        n = W * H - 1
+        x_minus_mu_sq = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        denom = 4 * (x_minus_mu_sq.sum(dim=[2, 3], keepdim=True) / n + self.lambda_)
+        y = x_minus_mu_sq / denom + 0.5
+        return x * y.sigmoid()
+
+
+class EMA(nn.Module):
+    """Efficient Multi-scale Attention (Ouyang et al. ICASSP 2023).
+
+    arXiv:2305.13563
+    Cross-spatial learning via grouped channels, parallel branches.
+    """
+
+    def __init__(self, channels: int, factor: int = 8):
+        super().__init__()
+        self.groups = factor if channels >= factor else 1
+        c_group = channels // self.groups
+        assert c_group > 0, f"channels={channels} too small for factor={factor}"
+        self.softmax = nn.Softmax(dim=-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(c_group, c_group)
+        self.conv1x1 = nn.Conv2d(c_group, c_group, kernel_size=1)
+        self.conv3x3 = nn.Conv2d(c_group, c_group, kernel_size=3, padding=1)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        gx = x.reshape(B * self.groups, -1, H, W)
+        x_h = self.pool_h(gx)
+        x_w = self.pool_w(gx).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [H, W], dim=2)
+        x1 = self.gn(gx * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(gx)
+        x11 = self.softmax(self.agp(x1).reshape(B * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(B * self.groups, x1.shape[1], -1)
+        x21 = self.softmax(self.agp(x2).reshape(B * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(B * self.groups, x1.shape[1], -1)
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(
+            B * self.groups, 1, H, W)
+        return (gx * weights.sigmoid()).reshape(B, C, H, W)
+
+
+class DCNv2Block(nn.Module):
+    """Modulated Deformable Convolution v2 (Zhu et al. CVPR 2019).
+
+    Uses torchvision.ops.deform_conv2d. Predicts offsets + modulation mask
+    from input via auxiliary conv. Drop-in replacement for standard Conv in
+    head FPN/PAN paths for adaptive receptive field on elongated objects.
+    """
+
+    def __init__(self, c1: int, c2: int, k: int = 3, s: int = 1, p: int = 1):
+        super().__init__()
+        self.k = k
+        self.s = s
+        self.p = p
+        # Main conv weights (manual, used by deform_conv2d)
+        self.weight = nn.Parameter(torch.empty(c2, c1, k, k))
+        self.bias = nn.Parameter(torch.zeros(c2))
+        nn.init.kaiming_normal_(self.weight, mode="fan_out", nonlinearity="relu")
+        # Offset (2 per kernel position) + mask (1 per kernel position)
+        self.offset_conv = nn.Conv2d(c1, 2 * k * k, k, s, p, bias=True)
+        self.mask_conv = nn.Conv2d(c1, k * k, k, s, p, bias=True)
+        # Zero-init offsets/masks for stable start (= regular conv)
+        nn.init.zeros_(self.offset_conv.weight)
+        nn.init.zeros_(self.offset_conv.bias)
+        nn.init.zeros_(self.mask_conv.weight)
+        nn.init.zeros_(self.mask_conv.bias)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        from torchvision.ops import deform_conv2d
+        offset = self.offset_conv(x)
+        mask = self.mask_conv(x).sigmoid()
+        y = deform_conv2d(
+            input=x,
+            offset=offset,
+            weight=self.weight,
+            bias=self.bias,
+            stride=self.s,
+            padding=self.p,
+            mask=mask,
+        )
+        return self.act(self.bn(y))

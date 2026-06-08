@@ -1,0 +1,59 @@
+# YOLOv13s + SimAM (parameter-free 3D attention, Yang et al. ICML 2021)
+#
+# Drop-in attention setelah tiap head DSC3k2 (5 inject points di head).
+# SimAM: zero learnable parameters → no FLOPs added (only memory ops).
+# Real prior art: Yang et al. ICML 2021 "SimAM: A Simple, Parameter-Free
+# Attention Module for Convolutional Neural Networks".
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  l: [1.00, 1.00,  512]
+  x: [1.00, 1.50,  512]
+
+backbone:
+  - [-1, 1, Conv,    [64, 3, 2]]                  # 0
+  - [-1, 1, Conv,    [128, 3, 2, 1, 2]]           # 1
+  - [-1, 2, DSC3k2,  [256, False, 0.25]]          # 2
+  - [-1, 1, Conv,    [256, 3, 2, 1, 4]]           # 3
+  - [-1, 2, DSC3k2,  [512, False, 0.25]]          # 4
+  - [-1, 1, DSConv,  [512, 3, 2]]                 # 5
+  - [-1, 4, A2C2f,   [512, True, 4]]              # 6
+  - [-1, 1, DSConv,  [1024, 3, 2]]                # 7
+  - [-1, 4, A2C2f,   [1024, True, 1]]             # 8
+
+head:
+  - [[4, 6, 8], 2, HyperACE, [512, 8, True, True, 0.5, 1, "both"]]   # 9
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 10
+  - [9, 1, DownsampleConv, []]                                       # 11
+  - [[6, 9],  1, FullPAD_Tunnel, []]                                 # 12
+  - [[4, 10], 1, FullPAD_Tunnel, []]                                 # 13
+  - [[8, 11], 1, FullPAD_Tunnel, []]                                 # 14
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]                       # 15
+  - [[-1, 12], 1, Concat, [1]]                                       # 16
+  - [-1, 2, DSC3k2, [512, True]]                                     # 17
+  - [-1, 1, SimAM, []]                                                # 18  attention
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 19
+
+  - [17, 1, nn.Upsample, [None, 2, "nearest"]]                       # 20
+  - [[-1, 13], 1, Concat, [1]]                                       # 21
+  - [-1, 2, DSC3k2, [256, True]]                                     # 22
+  - [-1, 1, SimAM, []]                                                # 23  attention
+  - [10, 1, Conv, [256, 1, 1]]                                       # 24
+  - [[23, 24], 1, FullPAD_Tunnel, []]                                # 25
+
+  - [-1, 1, Conv, [256, 3, 2]]                                       # 26
+  - [[-1, 19], 1, Concat, [1]]                                       # 27
+  - [-1, 2, DSC3k2, [512, True]]                                     # 28
+  - [-1, 1, SimAM, []]                                                # 29  attention
+  - [[-1, 9], 1, FullPAD_Tunnel, []]                                 # 30
+
+  - [28, 1, Conv, [512, 3, 2]]                                       # 31
+  - [[-1, 14], 1, Concat, [1]]                                       # 32
+  - [-1, 2, DSC3k2, [1024, True]]                                    # 33
+  - [-1, 1, SimAM, []]                                                # 34  attention
+  - [[-1, 11], 1, FullPAD_Tunnel, []]                                # 35
+
+  - [[25, 30, 35], 1, Detect, [nc]]                                  # 36

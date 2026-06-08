@@ -70,6 +70,9 @@ from .block import (
     HyperACEScale,
     MambaBlock,
     MambaC2f,
+    SimAM,
+    EMA,
+    DCNv2Block,
 )
 from .conv import (
     CBAM,
@@ -188,4 +191,7 @@ __all__ = (
     "HyperACEScale",
     "MambaBlock",
     "MambaC2f",
+    "SimAM",
+    "EMA",
+    "DCNv2Block",
 )

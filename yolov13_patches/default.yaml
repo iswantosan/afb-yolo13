@@ -102,6 +102,7 @@ dfl: 1.5 # (float) dfl loss gain
 # AFB-YOLOv13: NWD (Normalized Wasserstein Distance) hybrid loss for small/elongated objects.
 nwd_ratio: 0.0 # (float) NWD mix in BboxLoss. 0=CIoU only (baseline). 0.3-0.5 recommended for small obj.
 nwd_c: 12.8 # (float) NWD normalization constant (Wang et al. 2022 default).
+wiou_ratio: 0.0 # (float) WIoU v1 mix in BboxLoss. 0=disabled. 0.3-0.5 recommended (Tong et al. 2023).
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 nbs: 64 # (int) nominal batch size

@@ -88,6 +88,41 @@ class DFLoss(nn.Module):
         ).mean(-1, keepdim=True)
 
 
+def wiou_v1_loss(pred_xyxy, target_xyxy):
+    """Wise-IoU v1 (Tong et al. 2023, arXiv:2301.10051).
+
+    Base form: R_wiou * (1 - IoU), where R_wiou = exp(rho^2 / c^2)
+    rho = center distance, c = diagonal of enclosing box.
+    """
+    px1, py1, px2, py2 = pred_xyxy.unbind(-1)
+    tx1, ty1, tx2, ty2 = target_xyxy.unbind(-1)
+    # IoU
+    inter_x1 = torch.maximum(px1, tx1)
+    inter_y1 = torch.maximum(py1, ty1)
+    inter_x2 = torch.minimum(px2, tx2)
+    inter_y2 = torch.minimum(py2, ty2)
+    inter = (inter_x2 - inter_x1).clamp_(min=0) * (inter_y2 - inter_y1).clamp_(min=0)
+    area_p = (px2 - px1).clamp_(min=0) * (py2 - py1).clamp_(min=0)
+    area_t = (tx2 - tx1).clamp_(min=0) * (ty2 - ty1).clamp_(min=0)
+    union = area_p + area_t - inter + 1e-9
+    iou = inter / union
+    # Center distance squared
+    pcx = (px1 + px2) * 0.5
+    pcy = (py1 + py2) * 0.5
+    tcx = (tx1 + tx2) * 0.5
+    tcy = (ty1 + ty2) * 0.5
+    rho2 = (pcx - tcx).pow(2) + (pcy - tcy).pow(2)
+    # Enclosing box diagonal squared
+    ex1 = torch.minimum(px1, tx1)
+    ey1 = torch.minimum(py1, ty1)
+    ex2 = torch.maximum(px2, tx2)
+    ey2 = torch.maximum(py2, ty2)
+    c2 = (ex2 - ex1).pow(2) + (ey2 - ey1).pow(2) + 1e-9
+    # WIoU v1
+    R = torch.exp(rho2 / c2.detach())
+    return R * (1 - iou)
+
+
 def nwd_distance(pred_xyxy, target_xyxy, C: float = 12.8):
     """Normalized Wasserstein Distance similarity between two box sets.
 
@@ -140,19 +175,22 @@ class BboxLoss(nn.Module):
     where IoU gradient vanishes when boxes don't overlap.
     """
 
-    def __init__(self, reg_max=16, nwd_ratio: float = 0.0, nwd_c: float = 12.8):
+    def __init__(self, reg_max=16, nwd_ratio: float = 0.0, nwd_c: float = 12.8,
+                 wiou_ratio: float = 0.0):
         """Initialize the BboxLoss module.
 
         Args:
             reg_max: DFL distribution maximum.
-            nwd_ratio: 0.0 = pure CIoU (default, baseline). 1.0 = pure NWD.
-                       Recommended 0.3 - 0.5 for hybrid (small obj papers).
-            nwd_c:     NWD normalization constant. 12.8 (paper default).
+            nwd_ratio: 0.0 = pure CIoU. 1.0 = pure NWD. Hybrid 0.3-0.5 common.
+            nwd_c:     NWD normalization constant. 12.8 (Wang 2022 default).
+            wiou_ratio: 0.0 = no WIoU. >0 mix WIoU v1 with CIoU/NWD.
+                       Recommended 0.3-0.5 (Tong 2023, arXiv:2301.10051).
         """
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
         self.nwd_ratio = float(nwd_ratio)
         self.nwd_c = float(nwd_c)
+        self.wiou_ratio = float(wiou_ratio)
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU (+ optional NWD) loss."""
@@ -165,6 +203,12 @@ class BboxLoss(nn.Module):
             nwd = nwd_distance(pred_bboxes[fg_mask], target_bboxes[fg_mask], C=self.nwd_c)
             loss_nwd = ((1.0 - nwd).unsqueeze(-1) * weight).sum() / target_scores_sum
             loss_iou = (1.0 - self.nwd_ratio) * loss_iou + self.nwd_ratio * loss_nwd
+
+        # Hybrid WIoU v1 term (Tong et al. 2023, arXiv:2301.10051).
+        if self.wiou_ratio > 0:
+            wiou_term = wiou_v1_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+            loss_wiou = (wiou_term.unsqueeze(-1) * weight).sum() / target_scores_sum
+            loss_iou = (1.0 - self.wiou_ratio) * loss_iou + self.wiou_ratio * loss_wiou
 
         # DFL loss
         if self.dfl_loss:
@@ -242,7 +286,9 @@ class v8DetectionLoss:
         # Hybrid CIoU + NWD when nwd_ratio > 0. Default 0 = pure CIoU (baseline).
         nwd_ratio = float(getattr(h, "nwd_ratio", 0.0))
         nwd_c = float(getattr(h, "nwd_c", 12.8))
-        self.bbox_loss = BboxLoss(m.reg_max, nwd_ratio=nwd_ratio, nwd_c=nwd_c).to(device)
+        wiou_ratio = float(getattr(h, "wiou_ratio", 0.0))
+        self.bbox_loss = BboxLoss(m.reg_max, nwd_ratio=nwd_ratio, nwd_c=nwd_c,
+                                  wiou_ratio=wiou_ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):

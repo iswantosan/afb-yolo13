@@ -180,6 +180,7 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "iou",
     "fraction",
     "nwd_ratio",  # AFB-YOLOv13: 0=CIoU only, 1=NWD only
+    "wiou_ratio",  # AFB-YOLOv13: WIoU v1 mix (Tong 2023)
 }
 CFG_INT_KEYS = {  # integer-only arguments
     "epochs",
