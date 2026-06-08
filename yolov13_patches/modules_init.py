@@ -73,6 +73,10 @@ from .block import (
     SimAM,
     EMA,
     DCNv2Block,
+    # AFB-YOLO11 ablation modules
+    SPDConv,
+    CSA,
+    WTConv,
 )
 from .conv import (
     CBAM,
@@ -194,4 +198,8 @@ __all__ = (
     "SimAM",
     "EMA",
     "DCNv2Block",
+    # AFB-YOLO11 ablation modules
+    "SPDConv",
+    "CSA",
+    "WTConv",
 )

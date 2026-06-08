@@ -1,0 +1,61 @@
+# YOLO11s + PC-YOLO11s structure (Sensors 2025, PMC11768384, +4.3% mAP50 VisDrone)
+#
+# Architectural changes from baseline YOLO11s:
+#   1. Add P2/4 detection head (160x160 stride 4)
+#   2. Remove P5/32 detection head (low utility for small-obj microscopy)
+#   3. Add CSA (Coordinate Spatial Attention) at:
+#      - after each backbone C3k2 stage
+#      - before SPPF
+#
+# Detect on [P2, P3, P4] -> 3 scales (no P5). Optimized for small-obj density.
+# Original paper: VisDrone2019 39.5 -> 43.8 mAP50, params 9.4M -> 7.1M.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+backbone:
+  - [-1, 1, Conv,  [64, 3, 2]]         # 0
+  - [-1, 1, Conv,  [128, 3, 2]]        # 1
+  - [-1, 2, C3k2,  [256, False, 0.25]] # 2  (P2 feat)
+  - [-1, 1, CSA,   []]                 # 3  CSA after stage 1
+  - [-1, 1, Conv,  [256, 3, 2]]        # 4
+  - [-1, 2, C3k2,  [512, False, 0.25]] # 5  (P3 feat)
+  - [-1, 1, CSA,   []]                 # 6  CSA after stage 2
+  - [-1, 1, Conv,  [512, 3, 2]]        # 7
+  - [-1, 2, C3k2,  [512, True]]        # 8  (P4 feat)
+  - [-1, 1, CSA,   []]                 # 9  CSA after stage 3
+  - [-1, 1, Conv,  [1024, 3, 2]]       # 10
+  - [-1, 2, C3k2,  [1024, True]]       # 11 (P5 feat, internal only)
+  - [-1, 1, CSA,   []]                 # 12 CSA before SPPF
+  - [-1, 1, SPPF,  [1024, 5]]          # 13
+  - [-1, 2, C2PSA, [1024]]             # 14
+
+head:
+  # Top-down: P5 -> P4 -> P3 -> P2
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 15
+  - [[-1, 9], 1, Concat, [1]]                    # 16 cat P4 (after CSA #9)
+  - [-1, 2, C3k2, [512, False]]                  # 17 (head P4)
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 18
+  - [[-1, 6], 1, Concat, [1]]                    # 19 cat P3 (after CSA #6)
+  - [-1, 2, C3k2, [256, False]]                  # 20 (head P3)
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 21
+  - [[-1, 3], 1, Concat, [1]]                    # 22 cat P2 (after CSA #3)
+  - [-1, 2, C3k2, [128, False]]                  # 23 (P2/4 detect)
+
+  # Bottom-up: P2 -> P3 -> P4
+  - [-1, 1, Conv, [128, 3, 2]]                   # 24
+  - [[-1, 20], 1, Concat, [1]]                   # 25
+  - [-1, 2, C3k2, [256, False]]                  # 26 (P3/8 detect)
+
+  - [-1, 1, Conv, [256, 3, 2]]                   # 27
+  - [[-1, 17], 1, Concat, [1]]                   # 28
+  - [-1, 2, C3k2, [512, False]]                  # 29 (P4/16 detect)
+
+  - [[23, 26, 29], 1, Detect, [nc]]              # 30 Detect(P2, P3, P4)
