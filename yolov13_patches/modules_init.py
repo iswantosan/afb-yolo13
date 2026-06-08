@@ -77,6 +77,7 @@ from .block import (
     SPDConv,
     CSA,
     WTConv,
+    ACBlock,
 )
 from .conv import (
     CBAM,
@@ -202,4 +203,5 @@ __all__ = (
     "SPDConv",
     "CSA",
     "WTConv",
+    "ACBlock",
 )

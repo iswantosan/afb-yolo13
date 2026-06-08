@@ -2446,3 +2446,36 @@ class WTConv(nn.Module):
         if y.shape[-2:] != x.shape[-2:]:
             y = y[..., :x.shape[-2], :x.shape[-1]]
         return self.act(self.bn_out(y + residual))
+
+
+class ACBlock(nn.Module):
+    """Asymmetric Convolution Block (Ding et al. ICCV 2019, arXiv:1908.03930).
+
+    Parallel 3 branches: k×k square + 1×k horizontal + k×1 vertical, each
+    followed by its own BN, summed before activation. Bias toward elongated
+    horizontal/vertical features — matches AFB bacilli rod morphology
+    (length:width ~5:1).
+
+    Asymmetric branches are zero-initialized so the block starts identical
+    to a standard k×k Conv (safe init, no baseline degradation).
+    """
+
+    def __init__(self, c1: int, c2: int, k: int = 3, s: int = 1):
+        super().__init__()
+        p = k // 2
+        self.conv_sq  = nn.Conv2d(c1, c2, k, s, p, bias=False)
+        self.conv_1xk = nn.Conv2d(c1, c2, (1, k), s, (0, p), bias=False)
+        self.conv_kx1 = nn.Conv2d(c1, c2, (k, 1), s, (p, 0), bias=False)
+        self.bn_sq  = nn.BatchNorm2d(c2)
+        self.bn_1xk = nn.BatchNorm2d(c2)
+        self.bn_kx1 = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU()
+        # Safe init: asymmetric branches start at zero -> reduces to plain k×k conv
+        nn.init.zeros_(self.conv_1xk.weight)
+        nn.init.zeros_(self.conv_kx1.weight)
+
+    def forward(self, x):
+        y = self.bn_sq(self.conv_sq(x)) \
+            + self.bn_1xk(self.conv_1xk(x)) \
+            + self.bn_kx1(self.conv_kx1(x))
+        return self.act(y)

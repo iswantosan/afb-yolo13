@@ -43,6 +43,7 @@ VARIANT_TO_YAML = {
     "spd":      "configs/yolo11s-spd.yaml",
     "wtconv":   "configs/yolo11s-wtconv.yaml",
     "csa":      "configs/yolo11s-csa.yaml",
+    "acb":      "configs/yolo11s-acb.yaml",
 }
 
 DEFAULT_PRETRAINED = "yolo11s.pt"
