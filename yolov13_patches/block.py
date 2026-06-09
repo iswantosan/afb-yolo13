@@ -2304,178 +2304,35 @@ class DCNv2Block(nn.Module):
         return self.act(self.bn(y))
 
 
-# ============================================================================
-# AFB-YOLO11 ablation modules — verified real prior art, not yet tested on v13
-# ============================================================================
-#
-# SPDConv:  Sunkara & Luo 2022 ECML PKDD (arXiv:2208.03641)
-#           "No More Strided Convolutions or Pooling" — space-to-depth replaces
-#           stride-2 conv to preserve fine details for small objects.
-# CSA:      Coordinate Spatial Attention from PC-YOLO11s (Sensors 2025,
-#           PMC11768384). Combines coordinate (X/Y pool) + spatial attention.
-# WTConv:   Finder et al. ECCV 2024 (arXiv:2407.05848). Used in MS-YOLOv11
-#           (Sensors 2025, PMC12526788). Haar wavelet decompose -> depthwise
-#           conv on sub-bands -> reconstruct. Preserves edges for small obj.
-# ============================================================================
+class CoordAtt(nn.Module):
+    """Coordinate Attention (Hou et al. CVPR 2021, arXiv:2103.02907).
 
-
-class SPDConv(nn.Module):
-    """Space-to-Depth Conv (Sunkara & Luo 2022, arXiv:2208.03641).
-
-    Replace stride-2 conv with pixel_unshuffle(2) + non-strided conv. Avoids
-    information loss from strided downsampling — better small-obj recall.
-    Drop-in replacement: SPDConv(c1, c2) behaves like Conv(c1, c2, 3, 2).
+    Decomposes channel attention into two parallel 1D feature encodings along
+    H and W. Preserves positional information along the orthogonal axis —
+    well-suited for orientation-aware feature extraction on elongated targets
+    (rod-shaped bacilli at arbitrary in-plane rotation).
     """
 
-    def __init__(self, c1: int, c2: int, k: int = 3, scale: int = 2):
+    def __init__(self, c1: int, reduction: int = 32):
         super().__init__()
-        self.scale = scale
-        c_in = c1 * scale * scale
-        self.conv = nn.Conv2d(c_in, c2, k, stride=1, padding=k // 2, bias=False)
-        self.bn = nn.BatchNorm2d(c2)
-        self.act = nn.SiLU()
-
-    def forward(self, x):
-        x = F.pixel_unshuffle(x, self.scale)
-        return self.act(self.bn(self.conv(x)))
-
-
-class CSA(nn.Module):
-    """Coordinate Spatial Attention (PC-YOLO11s, Sensors 2025 PMC11768384).
-
-    Branch 1 — Coordinate attention: pool along H and W separately, learn
-               per-position channel attention from concatenated descriptors.
-    Branch 2 — Spatial attention: 7x7 conv over [avg, max] channel-pooled map.
-    Output = x * coord_attn * spatial_attn.
-    """
-
-    def __init__(self, c1: int, reduction: int = 16):
-        super().__init__()
-        mid = max(c1 // reduction, 4)
+        mip = max(8, c1 // reduction)
         self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))
-        self.conv_coord = nn.Conv2d(c1, mid, 1, bias=False)
-        self.bn_coord = nn.BatchNorm2d(mid)
-        self.act = nn.SiLU()
-        self.conv_h = nn.Conv2d(mid, c1, 1, bias=False)
-        self.conv_w = nn.Conv2d(mid, c1, 1, bias=False)
-        self.spatial = nn.Conv2d(2, 1, 7, padding=3, bias=False)
+        self.conv1 = nn.Conv2d(c1, mip, kernel_size=1, stride=1, padding=0)
+        self.bn1 = nn.BatchNorm2d(mip)
+        self.act = nn.Hardswish(inplace=True)
+        self.conv_h = nn.Conv2d(mip, c1, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, c1, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
+        identity = x
         B, C, H, W = x.shape
-        x_h = self.pool_h(x)                                     # B,C,H,1
-        x_w = self.pool_w(x).permute(0, 1, 3, 2)                 # B,C,W,1
-        y = torch.cat([x_h, x_w], dim=2)                         # B,C,H+W,1
-        y = self.act(self.bn_coord(self.conv_coord(y)))
-        y_h, y_w = torch.split(y, [H, W], dim=2)
-        y_w = y_w.permute(0, 1, 3, 2)                            # B,mid,1,W
-        a_h = self.conv_h(y_h).sigmoid()                         # B,C,H,1
-        a_w = self.conv_w(y_w).sigmoid()                         # B,C,1,W
-        coord = x * a_h * a_w
-        avg = coord.mean(dim=1, keepdim=True)
-        mx, _ = coord.max(dim=1, keepdim=True)
-        spat = self.spatial(torch.cat([avg, mx], dim=1)).sigmoid()
-        return coord * spat
-
-
-class _HaarDWT(nn.Module):
-    """Single-level 2D Haar discrete wavelet transform (depthwise)."""
-
-    def __init__(self):
-        super().__init__()
-        ll = torch.tensor([[1., 1.], [1., 1.]]) * 0.5
-        lh = torch.tensor([[1., 1.], [-1., -1.]]) * 0.5
-        hl = torch.tensor([[1., -1.], [1., -1.]]) * 0.5
-        hh = torch.tensor([[1., -1.], [-1., 1.]]) * 0.5
-        kernel = torch.stack([ll, lh, hl, hh], dim=0).unsqueeze(1)   # 4,1,2,2
-        self.register_buffer("kernel", kernel)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        if H % 2 or W % 2:
-            x = F.pad(x, (0, W % 2, 0, H % 2))
-        k = self.kernel.repeat(C, 1, 1, 1)                           # 4C,1,2,2
-        return F.conv2d(x, k, stride=2, groups=C)                    # B,4C,H/2,W/2
-
-
-class _HaarIDWT(nn.Module):
-    """Inverse 2D Haar DWT via transposed conv."""
-
-    def __init__(self):
-        super().__init__()
-        ll = torch.tensor([[1., 1.], [1., 1.]]) * 0.5
-        lh = torch.tensor([[1., 1.], [-1., -1.]]) * 0.5
-        hl = torch.tensor([[1., -1.], [1., -1.]]) * 0.5
-        hh = torch.tensor([[1., -1.], [-1., 1.]]) * 0.5
-        kernel = torch.stack([ll, lh, hl, hh], dim=0).unsqueeze(1) * 2
-        self.register_buffer("kernel", kernel)
-
-    def forward(self, x):
-        B, C4, H, W = x.shape
-        C = C4 // 4
-        k = self.kernel.repeat(C, 1, 1, 1)
-        return F.conv_transpose2d(x, k, stride=2, groups=C)
-
-
-class WTConv(nn.Module):
-    """Wavelet-Transform Conv (Finder et al. ECCV 2024, arXiv:2407.05848).
-
-    Adopted by MS-YOLOv11 (Sensors 2025, PMC12526788) to replace C3k2 blocks
-    in the backbone. Decompose -> depthwise conv on sub-bands -> reconstruct,
-    plus 1x1 residual base path. Large effective receptive field with small
-    kernels; preserves high-frequency edges relevant to AFB rods.
-    """
-
-    def __init__(self, c1: int, c2: int, k: int = 5):
-        super().__init__()
-        self.proj = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
-        self.dwt = _HaarDWT()
-        self.idwt = _HaarIDWT()
-        self.dw = nn.Conv2d(c2 * 4, c2 * 4, k, padding=k // 2,
-                            groups=c2 * 4, bias=False)
-        self.bn = nn.BatchNorm2d(c2 * 4)
-        self.act = nn.SiLU()
-        self.bn_out = nn.BatchNorm2d(c2)
-
-    def forward(self, x):
-        x = self.proj(x)
-        residual = x
-        y = self.dwt(x)
-        y = self.act(self.bn(self.dw(y)))
-        y = self.idwt(y)
-        if y.shape[-2:] != x.shape[-2:]:
-            y = y[..., :x.shape[-2], :x.shape[-1]]
-        return self.act(self.bn_out(y + residual))
-
-
-class ACBlock(nn.Module):
-    """Asymmetric Convolution Block (Ding et al. ICCV 2019, arXiv:1908.03930).
-
-    Parallel 3 branches: k×k square + 1×k horizontal + k×1 vertical, each
-    followed by its own BN, summed before activation. Bias toward elongated
-    horizontal/vertical features — matches AFB bacilli rod morphology
-    (length:width ~5:1).
-
-    Asymmetric branches are zero-initialized so the block starts identical
-    to a standard k×k Conv (safe init, no baseline degradation).
-    """
-
-    def __init__(self, c1: int, c2: int, k: int = 3, s: int = 1):
-        super().__init__()
-        p = k // 2
-        self.conv_sq  = nn.Conv2d(c1, c2, k, s, p, bias=False)
-        self.conv_1xk = nn.Conv2d(c1, c2, (1, k), s, (0, p), bias=False)
-        self.conv_kx1 = nn.Conv2d(c1, c2, (k, 1), s, (p, 0), bias=False)
-        self.bn_sq  = nn.BatchNorm2d(c2)
-        self.bn_1xk = nn.BatchNorm2d(c2)
-        self.bn_kx1 = nn.BatchNorm2d(c2)
-        self.act = nn.SiLU()
-        # Safe init: asymmetric branches start at zero -> reduces to plain k×k conv
-        nn.init.zeros_(self.conv_1xk.weight)
-        nn.init.zeros_(self.conv_kx1.weight)
-
-    def forward(self, x):
-        y = self.bn_sq(self.conv_sq(x)) \
-            + self.bn_1xk(self.conv_1xk(x)) \
-            + self.bn_kx1(self.conv_kx1(x))
-        return self.act(y)
+        x_h = self.pool_h(x)                          # (B,C,H,1)
+        x_w = self.pool_w(x).permute(0, 1, 3, 2)      # (B,C,W,1)
+        y = torch.cat([x_h, x_w], dim=2)              # (B,C,H+W,1)
+        y = self.act(self.bn1(self.conv1(y)))
+        x_h, x_w = torch.split(y, [H, W], dim=2)
+        x_w = x_w.permute(0, 1, 3, 2)                 # (B,mip,1,W)
+        a_h = self.conv_h(x_h).sigmoid()              # (B,C,H,1)
+        a_w = self.conv_w(x_w).sigmoid()              # (B,C,1,W)
+        return identity * a_h * a_w

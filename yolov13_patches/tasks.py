@@ -80,11 +80,7 @@ from ultralytics.nn.modules import (
     SimAM,
     EMA,
     DCNv2Block,
-    # AFB-YOLO11 ablation modules
-    SPDConv,
-    CSA,
-    WTConv,
-    ACBlock,
+    CoordAtt,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1124,15 +1120,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         elif m in {CBAM, ChannelAttention}:  # AFB-lite: attention takes c1 from previous layer
             c2 = ch[f]
             args = [c2, *args]
-        elif m in {SimAM, EMA, CSA}:  # AFB: attention modules, c1 only
+        elif m in {SimAM, EMA, CoordAtt}:  # AFB: parameter-free / lightweight attention, c1 only
             c2 = ch[f]
             args = [c2, *args]
         elif m is DCNv2Block:  # AFB: deformable conv v2, takes c1, c2, k, s, p
-            c1 = ch[f]
-            c2 = args[0]
-            c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, *args[1:]]
-        elif m in {SPDConv, WTConv, ACBlock}:  # AFB-YOLO11: takes c1+c2
             c1 = ch[f]
             c2 = args[0]
             c2 = make_divisible(min(c2, max_channels) * width, 8)
