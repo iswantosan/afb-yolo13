@@ -26,6 +26,9 @@ import numpy as np
 from PIL import Image
 
 
+# Default label set targets Tuberculosis6208 (Makerere) Pascal-VOC.
+# Override via CLI --label-name (repeatable) for other ZN-stain corpora
+# that may use different label strings (e.g., "bacilli", "AFB", "MTB").
 CLASS_MAP = {"TBbacillus": 0}
 CLASS_NAMES = ["bacilli"]
 
@@ -241,7 +244,16 @@ def main() -> None:
     ap.add_argument("--test-ratio", type=float, default=0.10)
     # k-fold
     ap.add_argument("--n-folds", type=int, default=5)
+    ap.add_argument("--label-name", action="append", default=None,
+                    help="VOC <label>/<name> string(s) to map to class 0 (bacilli). "
+                         "Repeatable. Default: TBbacillus.")
     args = ap.parse_args()
+
+    if args.label_name:
+        # Replace default CLASS_MAP with user-supplied labels — all map to class 0
+        global CLASS_MAP
+        CLASS_MAP = {name: 0 for name in args.label_name}
+        print(f"  [class-map] {CLASS_MAP}")
 
     if args.zip:
         maybe_extract_zip(Path(args.zip), Path(args.extract_dir or "dataset_raw"))
