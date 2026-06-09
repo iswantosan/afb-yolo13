@@ -1,0 +1,47 @@
+# YOLO11s + CBAM at P3/P4 backbone (BEFORE C2PSA)
+# Hypothesis: existing C2PSA operates at P5/32 where bacilli ~2px (spatial
+# detail lost). Inserting CBAM after P3 and P4 C3k2 outputs adds attention
+# at stages where rod-shape morphology still resolvable (~8px at P3, ~4px at
+# P4). Orthogonal to C2PSA — no redundancy.
+
+nc: 80
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+backbone:
+  - [-1, 1, Conv, [64, 3, 2]]               # 0
+  - [-1, 1, Conv, [128, 3, 2]]              # 1
+  - [-1, 2, C3k2, [256, False, 0.25]]       # 2
+  - [-1, 1, Conv, [256, 3, 2]]              # 3
+  - [-1, 2, C3k2, [512, False, 0.25]]       # 4 P3 features
+  - [-1, 1, CBAM, [7]]                      # 5 CBAM after P3
+  - [-1, 1, Conv, [512, 3, 2]]              # 6
+  - [-1, 2, C3k2, [512, True]]              # 7 P4 features
+  - [-1, 1, CBAM, [7]]                      # 8 CBAM after P4
+  - [-1, 1, Conv, [1024, 3, 2]]             # 9
+  - [-1, 2, C3k2, [1024, True]]             # 10
+  - [-1, 1, SPPF, [1024, 5]]                # 11
+  - [-1, 2, C2PSA, [1024]]                  # 12 (existing self-attention)
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 8], 1, Concat, [1]]               # cat P4-attended
+  - [-1, 2, C3k2, [512, False]]             # 15
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 5], 1, Concat, [1]]               # cat P3-attended
+  - [-1, 2, C3k2, [256, False]]             # 18 P3 head
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 15], 1, Concat, [1]]
+  - [-1, 2, C3k2, [512, False]]             # 21 P4 head
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]              # cat C2PSA
+  - [-1, 2, C3k2, [1024, True]]             # 24 P5 head
+
+  - [[18, 21, 24], 1, Detect, [nc]]
