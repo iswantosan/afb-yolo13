@@ -2338,6 +2338,50 @@ class CoordAtt(nn.Module):
         return identity * a_h * a_w
 
 
+class WTConv(nn.Module):
+    """WTConv: Wavelet-Transform Convolution (Finder et al. ECCV 2024).
+
+    arXiv:2407.05848. Approximate implementation:
+      1. Haar DWT (1 level) -> 4 sub-bands at half spatial resolution
+      2. Depthwise conv (kernel_size) on stacked sub-bands
+      3. Haar IDWT (transposed conv) -> reconstruct to original resolution
+      4. Residual connection to projected input
+
+    Effective receptive field grows with both kernel_size AND wavelet level.
+    For AFB on multi-color background dataset: wavelet decomposition naturally
+    separates low-freq (background color, illumination) from high-freq (bacilli
+    rod texture, edges), enabling the depthwise conv to focus processing on
+    discriminative high-frequency sub-bands.
+    """
+
+    def __init__(self, c1: int, c2: int, kernel_size: int = 5):
+        super().__init__()
+        self.proj_in = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+        haar = torch.tensor([
+            [[ 1.,  1.], [ 1.,  1.]],   # LL: average
+            [[ 1., -1.], [ 1., -1.]],   # LH: horizontal
+            [[ 1.,  1.], [-1., -1.]],   # HL: vertical
+            [[ 1., -1.], [-1.,  1.]],   # HH: diagonal
+        ]) * 0.5
+        self.register_buffer("haar", haar.view(4, 1, 2, 2))
+        pad = kernel_size // 2
+        self.dwconv = nn.Conv2d(c2 * 4, c2 * 4, kernel_size,
+                                 padding=pad, groups=c2 * 4, bias=True)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU()
+        self.gain = nn.Parameter(torch.tensor(2.0))
+
+    def forward(self, x):
+        from torch.nn import functional as F
+        x = self.proj_in(x)
+        B, C, H, W = x.shape
+        haar_w = self.haar.repeat(C, 1, 1, 1)
+        sub = F.conv2d(x, haar_w, stride=2, groups=C)
+        sub = self.dwconv(sub)
+        rec = F.conv_transpose2d(sub, haar_w, stride=2, groups=C) * self.gain
+        return self.act(self.bn(rec) + x)
+
+
 class IBNConv(nn.Module):
     """Conv + IBN (Instance-Batch hybrid Normalization) + SiLU.
 

@@ -1,0 +1,49 @@
+# YOLO12s + WTConv backbone (Finder et al. ECCV 2024, arXiv:2407.05848)
+#
+# Replace C3k2, C3k2Attn, A2C2f backbone blocks with WTConv (Haar DWT ->
+# depthwise conv on 4 sub-bands -> IDWT + residual). Wavelet decomposition
+# naturally separates low-freq components (background color, illumination)
+# from high-freq (bacilli rod edges) — direct fit for Raw_Sputum 4-bg-color
+# multi-distribution dataset.
+#
+# Diagnostic motivation: stratified evaluation menunjukkan Greenish/Bluish
+# underperform 10% — WTConv-frequency-domain processing decouples background
+# color from foreground rod morphology.
+
+nc: 1
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+backbone:
+  - [-1, 1, Conv,   [64, 3, 2]]                    # 0
+  - [-1, 1, Conv,   [128, 3, 2, 1, 2]]             # 1
+  - [-1, 1, WTConv, [256]]                          # 2 (was C3k2)
+  - [-1, 1, Conv,   [256, 3, 2, 1, 4]]             # 3-P3/8
+  - [-1, 1, WTConv, [512]]                          # 4 (was C3k2Attn)
+  - [-1, 1, Conv,   [512, 3, 2]]                    # 5-P4/16
+  - [-1, 1, WTConv, [512]]                          # 6 (was A2C2f)
+  - [-1, 1, Conv,   [1024, 3, 2]]                   # 7-P5/32
+  - [-1, 1, WTConv, [1024]]                         # 8 (was A2C2f)
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [512, False, -1]]                # 11
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [256, False, -1]]                # 14
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 11], 1, Concat, [1]]
+  - [-1, 2, A2C2f, [512, False, -1]]                # 17
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 8], 1, Concat, [1]]
+  - [-1, 2, C3k2Attn, [1024, True]]                 # 20
+
+  - [[14, 17, 20], 1, Detect, [nc]]

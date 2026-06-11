@@ -75,6 +75,7 @@ from .block import (
     DCNv2Block,
     CoordAtt,
     IBNConv,
+    WTConv,
 )
 from .conv import (
     CBAM,
@@ -198,4 +199,5 @@ __all__ = (
     "DCNv2Block",
     "CoordAtt",
     "IBNConv",
+    "WTConv",
 )
