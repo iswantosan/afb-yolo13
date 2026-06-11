@@ -74,6 +74,7 @@ from .block import (
     EMA,
     DCNv2Block,
     CoordAtt,
+    IBNConv,
 )
 from .conv import (
     CBAM,
@@ -196,4 +197,5 @@ __all__ = (
     "EMA",
     "DCNv2Block",
     "CoordAtt",
+    "IBNConv",
 )

@@ -2336,3 +2336,35 @@ class CoordAtt(nn.Module):
         a_h = self.conv_h(x_h).sigmoid()              # (B,C,H,1)
         a_w = self.conv_w(x_w).sigmoid()              # (B,C,1,W)
         return identity * a_h * a_w
+
+
+class IBNConv(nn.Module):
+    """Conv + IBN (Instance-Batch hybrid Normalization) + SiLU.
+
+    Drop-in replacement for ultralytics.nn.modules.conv.Conv with normalization
+    swapped from pure BatchNorm to hybrid:
+      - first half channels -> InstanceNorm (style/color-invariant)
+      - second half channels -> BatchNorm (discriminative)
+
+    Reference: Pan et al. ECCV 2018, "Two at Once: Enhancing Learning and
+    Generalization Capacities via IBN-Net" (arXiv:1807.09441).
+    Targets cross-distribution generalization on multi-camera / multi-stain
+    medical imaging where background color shifts dominate variance.
+    """
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True, ratio=0.5):
+        super().__init__()
+        if p is None:
+            p = (k // 2) if d == 1 else (d * (k - 1) // 2)
+        self.c_in = int(c2 * ratio)
+        self.c_bn = c2 - self.c_in
+        self.conv = nn.Conv2d(c1, c2, k, s, p, groups=g, dilation=d, bias=False)
+        self.in_norm = nn.InstanceNorm2d(self.c_in, affine=True)
+        self.bn = nn.BatchNorm2d(self.c_bn)
+        self.act = nn.SiLU() if act is True else (act if isinstance(act, nn.Module) else nn.Identity())
+
+    def forward(self, x):
+        x = self.conv(x)
+        x_in = self.in_norm(x[:, :self.c_in])
+        x_bn = self.bn(x[:, self.c_in:])
+        return self.act(torch.cat([x_in, x_bn], dim=1))
