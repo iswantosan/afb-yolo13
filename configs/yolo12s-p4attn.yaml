@@ -1,12 +1,12 @@
-# YOLO12s — REPLACE P4 detect head A2C2f with C2PSA (transformer attention)
+# YOLO12s — ENABLE A2C2f attention at P4 head (transformer attention at dominant scale)
 #
-# Bring YOLO11's proven self-attention block (C2PSA = stacked PSABlocks with
-# multi-head QKV + positional encoding) to the dominant detection scale P4.
-# Logic: paper YOLOv10s baseline 0.89 leverages strong feature extraction at
-# dominant scale; YOLO12's A2C2f is good but C2PSA explicitly transformer-
-# attention design might handle multi-color-background better via cross-spatial
-# context modeling.
-# All other heads kept. Pure module replacement at single point.
+# A2C2f (Area Attention C2f) is YOLO12's native transformer-style attention block.
+# Baseline yolo12s uses A2C2f with attention=False di P4 FPN (layer 11) dan P4
+# detect (layer 17). Variant ini SET attention=True di KEDUA P4 path → full
+# attention-based feature aggregation di scale dominant.
+#
+# Lebih clean dari C2PSA (yang require c1==c2). A2C2f handle channel mismatch
+# natively. All other heads kept intact.
 
 nc: 1
 scales:
@@ -21,7 +21,7 @@ backbone:
   - [-1, 1, Conv,  [128, 3, 2, 1, 2]]
   - [-1, 2, C3k2,  [256, False, 0.25]]
   - [-1, 1, Conv,  [256, 3, 2, 1, 4]]
-  - [-1, 4, C3k2Attn, [512, False, 0.25]]
+  - [-1, 4, C3k2, [512, False, 0.25]]
   - [-1, 1, Conv,  [512, 3, 2]]
   - [-1, 2, A2C2f, [512, True, 1]]
   - [-1, 1, Conv,  [1024, 3, 2]]
@@ -30,18 +30,18 @@ backbone:
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 6], 1, Concat, [1]]
-  - [-1, 2, A2C2f, [512, False, -1]]             # 11
+  - [-1, 2, A2C2f, [512, True, -1]]              # 11 P4 FPN — attention ENABLED (was False)
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]]
-  - [-1, 2, A2C2f, [256, False, -1]]             # 14 P3
+  - [-1, 2, A2C2f, [256, False, -1]]             # 14 P3 head (unchanged)
 
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 11], 1, Concat, [1]]
-  - [-1, 2, C2PSA, [512]]                         # 17 P4 detect REPLACED with C2PSA
+  - [-1, 2, A2C2f, [512, True, -1]]              # 17 P4 detect — attention ENABLED (was False)
 
   - [-1, 1, Conv, [512, 3, 2]]
   - [[-1, 8], 1, Concat, [1]]
-  - [-1, 2, C3k2, [1024, True]]                  # 20 P5
+  - [-1, 2, C3k2, [1024, True]]                  # 20 P5 (unchanged)
 
   - [[14, 17, 20], 1, Detect, [nc]]
